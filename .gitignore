@@ -1,0 +1,40 @@
+# Binary output (root level only)
+/flashdb
+/flashdb.exe
+/flashdb.exe~
+/flashdb-benchmark
+/flashdb-benchmark.exe
+
+# Data directory
+data/
+flashdb-data/
+*.wal
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test output
+coverage.out
+*.test
+*.prof
+
+# Dependency directories
+vendor/
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+frontend/.env*.local
+
+# Logs
+*.log
+npm-debug.log*
