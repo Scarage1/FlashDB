@@ -38,3 +38,9 @@ frontend/.env*.local
 # Logs
 *.log
 npm-debug.log*
+
+# Environment files (never commit secrets!)
+.env
+.env.local
+.env.production
+!.env.example

@@ -1,0 +1,97 @@
+# =============================================================================
+# FlashDB Docker Compose - Production Setup
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------------------------
+  # FlashDB Server
+  # ---------------------------------------------------------------------------
+  flashdb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flashdb-server
+    restart: unless-stopped
+    ports:
+      - "6379:6379"   # Redis protocol
+      - "8080:8080"   # HTTP API
+    volumes:
+      - flashdb-data:/data
+    environment:
+      - FLASHDB_ADDR=:6379
+      - FLASHDB_DATA=/data
+      - FLASHDB_PASSWORD=${FLASHDB_PASSWORD:-}
+      - FLASHDB_MAXCLIENTS=10000
+    command: >
+      -addr :6379
+      -data /data
+      -web
+      -webaddr :8080
+      ${FLASHDB_PASSWORD:+-requirepass $FLASHDB_PASSWORD}
+    healthcheck:
+      test: ["CMD", "sh", "-c", "echo PING | nc -w 1 localhost 6379 | grep -q PONG"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - flashdb-network
+    labels:
+      - "com.flashdb.service=database"
+      - "com.flashdb.version=1.0.0"
+
+  # ---------------------------------------------------------------------------
+  # Nginx Reverse Proxy (Optional - for HTTPS)
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: flashdb-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - certbot-webroot:/var/www/certbot:ro
+    depends_on:
+      - flashdb
+    networks:
+      - flashdb-network
+    profiles:
+      - with-nginx
+
+  # ---------------------------------------------------------------------------
+  # Certbot for SSL (Optional)
+  # ---------------------------------------------------------------------------
+  certbot:
+    image: certbot/certbot
+    container_name: flashdb-certbot
+    volumes:
+      - ./nginx/ssl:/etc/letsencrypt
+      - certbot-webroot:/var/www/certbot
+    command: certonly --webroot -w /var/www/certbot --email ${SSL_EMAIL} -d ${DOMAIN} --agree-tos --non-interactive
+    profiles:
+      - with-nginx
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  flashdb-data:
+    driver: local
+    labels:
+      - "com.flashdb.volume=data"
+  certbot-webroot:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  flashdb-network:
+    driver: bridge
+    labels:
+      - "com.flashdb.network=main"

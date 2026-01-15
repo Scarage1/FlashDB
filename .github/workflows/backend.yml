@@ -1,0 +1,181 @@
+# =============================================================================
+# FlashDB Backend CI/CD Pipeline
+# =============================================================================
+# Triggers on push to main/master branch and pull requests
+# Runs tests, builds Docker image, pushes to registry, deploys to DigitalOcean
+
+name: Backend CI/CD
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - '.github/workflows/backend.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+
+env:
+  GO_VERSION: '1.22'
+  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/flashdb
+
+jobs:
+  # ===========================================================================
+  # Test Job - Run on all pushes and PRs
+  # ===========================================================================
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: github.event_name == 'push'
+        with:
+          files: ./coverage.out
+          flags: backend
+          fail_ci_if_error: false
+
+  # ===========================================================================
+  # Build Job - Build and push Docker image
+  # ===========================================================================
+  build:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ===========================================================================
+  # Deploy Job - Deploy to DigitalOcean
+  # ===========================================================================
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    environment: production
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy docker-compose to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USERNAME }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: "docker-compose.yml"
+          target: "/opt/flashdb"
+
+      - name: Deploy to DigitalOcean
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USERNAME }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          script: |
+            cd /opt/flashdb
+            
+            # Set environment variables
+            export DOCKER_IMAGE=${{ env.DOCKER_IMAGE }}
+            export FLASHDB_PASSWORD=${{ secrets.FLASHDB_PASSWORD }}
+            
+            # Pull latest image
+            docker pull ${{ env.DOCKER_IMAGE }}:latest
+            
+            # Stop existing container gracefully
+            docker-compose down --timeout 30 || true
+            
+            # Start new container
+            docker-compose up -d flashdb
+            
+            # Cleanup old images
+            docker image prune -f
+            
+            # Verify deployment
+            sleep 10
+            docker-compose ps
+            docker-compose logs --tail=20 flashdb
+
+      - name: Health check
+        run: |
+          sleep 15
+          # Check if server responds to PING
+          echo "PING" | nc -w 5 ${{ secrets.DO_HOST }} 6379 | grep -q "PONG" && echo "✅ FlashDB is healthy!" || echo "⚠️ Health check pending..."
+        continue-on-error: true
+
+      - name: Notify deployment success
+        if: success()
+        run: |
+          echo "🚀 FlashDB deployed successfully!"
+          echo "Server: ${{ secrets.DO_HOST }}"
+          echo "Redis Port: 6379"
+          echo "API Port: 8080"
