@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -47,6 +48,7 @@ func DefaultConfig() Config {
 type clientConn struct {
 	id            int64
 	conn          net.Conn
+	writeMu       sync.Mutex
 	addr          string
 	authenticated bool
 	createdAt     time.Time
@@ -1716,21 +1718,41 @@ func (ps *PubSub) Publish(channel string, message string) int {
 }
 
 func (ps *PubSub) sendMessage(client *clientConn, msgType, channel, message string) {
-	// Write directly to client connection
-	w := protocol.NewWriter(client.conn)
+	var buf bytes.Buffer
+	w := protocol.NewWriter(&buf)
 	w.WriteArrayHeader(3)
 	w.WriteBulkString([]byte(msgType))
 	w.WriteBulkString([]byte(channel))
 	w.WriteBulkString([]byte(message))
+
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
+	_ = writeAll(client.conn, buf.Bytes())
 }
 
 func (ps *PubSub) sendPMessage(client *clientConn, pattern, channel, message string) {
-	w := protocol.NewWriter(client.conn)
+	var buf bytes.Buffer
+	w := protocol.NewWriter(&buf)
 	w.WriteArrayHeader(4)
 	w.WriteBulkString([]byte("pmessage"))
 	w.WriteBulkString([]byte(pattern))
 	w.WriteBulkString([]byte(channel))
 	w.WriteBulkString([]byte(message))
+
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
+	_ = writeAll(client.conn, buf.Bytes())
+}
+
+func writeAll(conn net.Conn, data []byte) error {
+	for len(data) > 0 {
+		n, err := conn.Write(data)
+		if err != nil {
+			return err
+		}
+		data = data[n:]
+	}
+	return nil
 }
 
 func (ps *PubSub) matchPattern(pattern, channel string) bool {
