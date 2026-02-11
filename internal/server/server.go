@@ -1257,14 +1257,16 @@ func (s *Server) cmdRename(w *protocol.Writer, args []protocol.Value) {
 	oldKey := args[0].Str
 	newKey := args[1].Str
 
-	val, exists := s.engine.Get(oldKey)
-	if !exists {
+	renamed, err := s.engine.Rename(oldKey, newKey, false)
+	if err != nil {
+		w.WriteError("internal error")
+		return
+	}
+	if !renamed {
 		w.WriteError("no such key")
 		return
 	}
 
-	s.engine.Delete(oldKey)
-	s.engine.Set(newKey, val)
 	w.WriteSimpleString("OK")
 }
 
@@ -1278,19 +1280,22 @@ func (s *Server) cmdRenameNX(w *protocol.Writer, args []protocol.Value) {
 	oldKey := args[0].Str
 	newKey := args[1].Str
 
-	val, exists := s.engine.Get(oldKey)
-	if !exists {
+	if !s.engine.Exists(oldKey) {
 		w.WriteError("no such key")
 		return
 	}
 
-	if s.engine.Exists(newKey) {
+	renamed, err := s.engine.Rename(oldKey, newKey, true)
+	if err != nil {
+		w.WriteError("internal error")
+		return
+	}
+
+	if !renamed {
 		w.WriteInteger(0)
 		return
 	}
 
-	s.engine.Delete(oldKey)
-	s.engine.Set(newKey, val)
 	w.WriteInteger(1)
 }
 
@@ -2195,24 +2200,17 @@ func (s *Server) cmdCopy(w *protocol.Writer, args []protocol.Value) {
 		}
 	}
 
-	value, exists := s.engine.Get(source)
-	if !exists {
-		w.WriteInteger(0)
-		return
-	}
-
-	// Check if dest exists and REPLACE not specified
-	if s.engine.Exists(dest) && !replace {
-		w.WriteInteger(0)
-		return
-	}
-
-	if err := s.engine.Set(dest, value); err != nil {
+	copied, err := s.engine.Copy(source, dest, replace)
+	if err != nil {
 		w.WriteError("internal error")
 		return
 	}
 
-	w.WriteInteger(1)
+	if copied {
+		w.WriteInteger(1)
+	} else {
+		w.WriteInteger(0)
+	}
 }
 
 // ========================

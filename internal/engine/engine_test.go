@@ -252,3 +252,101 @@ func TestEngine_FlushDB(t *testing.T) {
 	info, _ := os.Stat(walPath)
 	assert.Equal(t, int64(0), info.Size())
 }
+
+func TestEngine_RenamePreservesTTL(t *testing.T) {
+	tmpDir := t.TempDir()
+	walPath := filepath.Join(tmpDir, "test.wal")
+
+	e, err := New(walPath)
+	require.NoError(t, err)
+
+	err = e.SetWithTTL("old", []byte("value"), 5*time.Second)
+	require.NoError(t, err)
+
+	renamed, err := e.Rename("old", "new", false)
+	require.NoError(t, err)
+	assert.True(t, renamed)
+
+	_, oldExists := e.Get("old")
+	assert.False(t, oldExists)
+
+	val, newExists := e.Get("new")
+	assert.True(t, newExists)
+	assert.Equal(t, []byte("value"), val)
+	assert.True(t, e.PTTL("new") > 0)
+
+	require.NoError(t, e.Close())
+
+	e2, err := New(walPath)
+	require.NoError(t, err)
+	defer e2.Close()
+
+	val, newExists = e2.Get("new")
+	assert.True(t, newExists)
+	assert.Equal(t, []byte("value"), val)
+	assert.True(t, e2.PTTL("new") > 0)
+}
+
+func TestEngine_RenameNX(t *testing.T) {
+	tmpDir := t.TempDir()
+	walPath := filepath.Join(tmpDir, "test.wal")
+
+	e, err := New(walPath)
+	require.NoError(t, err)
+	defer e.Close()
+
+	require.NoError(t, e.Set("old", []byte("value-old")))
+	require.NoError(t, e.Set("new", []byte("value-new")))
+
+	renamed, err := e.Rename("old", "new", true)
+	require.NoError(t, err)
+	assert.False(t, renamed)
+
+	val, exists := e.Get("old")
+	assert.True(t, exists)
+	assert.Equal(t, []byte("value-old"), val)
+
+	val, exists = e.Get("new")
+	assert.True(t, exists)
+	assert.Equal(t, []byte("value-new"), val)
+}
+
+func TestEngine_CopyPreservesTTLAndRecovery(t *testing.T) {
+	tmpDir := t.TempDir()
+	walPath := filepath.Join(tmpDir, "test.wal")
+
+	e, err := New(walPath)
+	require.NoError(t, err)
+
+	err = e.SetWithTTL("source", []byte("value"), 5*time.Second)
+	require.NoError(t, err)
+
+	copied, err := e.Copy("source", "dest", false)
+	require.NoError(t, err)
+	assert.True(t, copied)
+
+	sourceVal, sourceExists := e.Get("source")
+	assert.True(t, sourceExists)
+	assert.Equal(t, []byte("value"), sourceVal)
+	assert.True(t, e.PTTL("source") > 0)
+
+	destVal, destExists := e.Get("dest")
+	assert.True(t, destExists)
+	assert.Equal(t, []byte("value"), destVal)
+	assert.True(t, e.PTTL("dest") > 0)
+
+	copied, err = e.Copy("source", "dest", false)
+	require.NoError(t, err)
+	assert.False(t, copied)
+
+	require.NoError(t, e.Close())
+
+	e2, err := New(walPath)
+	require.NoError(t, err)
+	defer e2.Close()
+
+	destVal, destExists = e2.Get("dest")
+	assert.True(t, destExists)
+	assert.Equal(t, []byte("value"), destVal)
+	assert.True(t, e2.PTTL("dest") > 0)
+}

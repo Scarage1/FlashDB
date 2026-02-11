@@ -119,6 +119,30 @@ func (e *Engine) recordCommand() {
 	e.totalCommands.Add(1)
 }
 
+func cloneEntry(entry *store.Entry) *store.Entry {
+	cloned := &store.Entry{
+		ExpireAt:  entry.ExpireAt,
+		HasExpire: entry.HasExpire,
+	}
+	if entry.Value != nil {
+		cloned.Value = append([]byte(nil), entry.Value...)
+	}
+	return cloned
+}
+
+func walRecordForEntry(key string, entry *store.Entry) wal.Record {
+	rec := wal.Record{
+		Type:  wal.OpSet,
+		Key:   []byte(key),
+		Value: append([]byte(nil), entry.Value...),
+	}
+	if entry.HasExpire {
+		rec.Type = wal.OpSetWithTTL
+		rec.ExpireAt = entry.ExpireAt.UnixMilli()
+	}
+	return rec
+}
+
 // Set stores a key-value pair.
 // The operation is persisted to WAL before being applied.
 func (e *Engine) Set(key string, value []byte) error {
@@ -300,6 +324,79 @@ func (e *Engine) Persist(key string) (bool, error) {
 
 	e.recordCommand()
 	return false, nil
+}
+
+// Rename renames a key. If nx is true, it only renames when destination doesn't exist.
+func (e *Engine) Rename(oldKey, newKey string, nx bool) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	entry, exists := e.store.GetEntry(oldKey)
+	if !exists {
+		e.recordCommand()
+		return false, nil
+	}
+
+	if oldKey == newKey {
+		if nx {
+			e.recordCommand()
+			return false, nil
+		}
+		e.recordCommand()
+		return true, nil
+	}
+
+	if nx && e.store.Exists(newKey) {
+		e.recordCommand()
+		return false, nil
+	}
+
+	newRec := walRecordForEntry(newKey, entry)
+	if err := e.wal.Append(newRec); err != nil {
+		return false, fmt.Errorf("engine: failed to write WAL: %w", err)
+	}
+	if err := e.wal.Append(wal.Record{Type: wal.OpDelete, Key: []byte(oldKey)}); err != nil {
+		return false, fmt.Errorf("engine: failed to write WAL: %w", err)
+	}
+
+	e.store.SetEntry(newKey, cloneEntry(entry))
+	e.store.Delete(oldKey)
+	e.recordWrite()
+	return true, nil
+}
+
+// Copy copies source key to destination key. If replace is false and destination exists, it returns false.
+func (e *Engine) Copy(sourceKey, destKey string, replace bool) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	entry, exists := e.store.GetEntry(sourceKey)
+	if !exists {
+		e.recordCommand()
+		return false, nil
+	}
+
+	if sourceKey == destKey {
+		if !replace {
+			e.recordCommand()
+			return false, nil
+		}
+		e.recordCommand()
+		return true, nil
+	}
+
+	if !replace && e.store.Exists(destKey) {
+		e.recordCommand()
+		return false, nil
+	}
+
+	if err := e.wal.Append(walRecordForEntry(destKey, entry)); err != nil {
+		return false, fmt.Errorf("engine: failed to write WAL: %w", err)
+	}
+
+	e.store.SetEntry(destKey, cloneEntry(entry))
+	e.recordWrite()
+	return true, nil
 }
 
 // Keys returns all keys in the store.
