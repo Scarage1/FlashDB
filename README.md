@@ -85,18 +85,20 @@ npm run dev
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-port` | `6379` | Server port |
-| `-host` | `0.0.0.0` | Bind address |
-| `-data` | `flashdb-data` | Data directory |
-| `-requirepass` | ` ` | Enable authentication |
+| `-addr` | `:6379` | Server address (`host:port`) |
+| `-data` | `data` | Data directory |
+| `-requirepass` | ` ` | Password required for `AUTH` |
+| `-maxclients` | `10000` | Maximum concurrent clients |
+| `-timeout` | `0` | Client timeout in seconds (`0` = disabled) |
 | `-web` | `false` | Enable legacy web UI |
 | `-webaddr` | `:8080` | Legacy web UI address |
+| `-version` | `false` | Print version and exit |
 
 ### Examples
 
 ```bash
 # Run on custom port with authentication
-./flashdb.exe -port 6380 -requirepass mysecretpassword
+./flashdb.exe -addr :6380 -requirepass mysecretpassword
 
 # Enable legacy web interface
 ./flashdb.exe -web -webaddr :8080
@@ -261,7 +263,7 @@ OK
 ### Security Best Practices
 
 - ✅ Always use authentication in production
-- ✅ Bind to localhost (`-host 127.0.0.1`) when not needed externally
+- ✅ Bind to localhost (`-addr 127.0.0.1:6379`) when not needed externally
 - ✅ Use strong passwords (16+ characters, mixed case, numbers, symbols)
 - ✅ Run behind a firewall
 - ✅ Monitor access logs regularly
