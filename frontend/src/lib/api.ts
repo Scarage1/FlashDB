@@ -33,12 +33,60 @@ interface KeysAPIResponse {
   keys?: Array<string | KeyInfo>;
 }
 
+function parseCommandInput(input: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let inQuote = false;
+  let quoteChar = '';
+
+  for (let i = 0; i < input.length; i++) {
+    const char = input[i];
+
+    if (inQuote) {
+      if (char === quoteChar) {
+        inQuote = false;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      inQuote = true;
+      quoteChar = char;
+      continue;
+    }
+
+    if (char === ' ') {
+      if (current.length > 0) {
+        parts.push(current);
+        current = '';
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current.length > 0) {
+    parts.push(current);
+  }
+
+  return parts;
+}
+
 export async function executeCommand(command: string): Promise<CommandResponse> {
   try {
+    const parsed = parseCommandInput(command.trim());
+    const payload =
+      parsed.length > 0
+        ? { command: parsed[0], args: parsed.slice(1) }
+        : { command };
+
     const response = await fetch(`${API_BASE}/execute`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command }),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
