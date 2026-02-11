@@ -262,7 +262,7 @@ OK
 
 ### Security Best Practices
 
-- ✅ Always use authentication in production
+- ✅ Always use authentication when exposed beyond localhost
 - ✅ Bind to localhost (`-addr 127.0.0.1:6379`) when not needed externally
 - ✅ Use strong passwords (16+ characters, mixed case, numbers, symbols)
 - ✅ Run behind a firewall
@@ -298,11 +298,9 @@ flashdb/
 │   │   └── lib/              # Utilities & API
 │   └── public/               # Static assets
 ├── docs/                     # Documentation
-│   ├── ARCHITECTURE.md
+│   ├── README.md
 │   ├── COMMANDS.md
-│   ├── OPENAPI.yaml
-│   ├── PROTOCOL.md
-│   └── WAL.md
+│   └── PROTOCOL.md
 ├── go.mod
 ├── go.sum
 └── README.md
@@ -328,13 +326,11 @@ go test ./internal/server/
 
 ## 📖 Documentation
 
-Detailed documentation available in the `/docs` folder:
+Core documentation is available in the `/docs` folder:
 
-- [**Architecture**](docs/ARCHITECTURE.md) — System design and component overview
-- [**Commands**](docs/COMMANDS.md) — Complete command reference
-- [**OpenAPI**](docs/OPENAPI.yaml) — Versioned HTTP API contract (`/api/v1`)
-- [**Protocol**](docs/PROTOCOL.md) — RESP protocol implementation details
-- [**WAL**](docs/WAL.md) — Write-ahead log and persistence
+- [**Docs Index**](docs/README.md) — Navigation entry point
+- [**Commands**](docs/COMMANDS.md) — Command reference
+- [**Protocol**](docs/PROTOCOL.md) — RESP protocol details
 
 ---
 

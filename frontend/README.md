@@ -15,7 +15,7 @@ A modern, Apple-inspired UI for FlashDB built with Next.js, React, TypeScript, a
 ### Prerequisites
 
 - Node.js 18+
-- FlashDB server running on port 6380 (with Web UI on 8080)
+- FlashDB server running on port 6379 (HTTP API on 8080)
 
 ### Installation
 
@@ -32,13 +32,13 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-### Production Build
+### Build Check
 
 ```bash
-# Build for production
+# Build the frontend
 npm run build
 
-# Start production server
+# Start local server from build output
 npm start
 ```
 
@@ -84,7 +84,7 @@ Configure this in `next.config.js` if needed.
 
 ## Tech Stack
 
-- **Framework**: Next.js 14
+- **Framework**: Next.js 16
 - **Language**: TypeScript
 - **Styling**: Tailwind CSS
 - **Icons**: Lucide React
