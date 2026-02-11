@@ -34,6 +34,11 @@ const (
 	TypeArray        = '*'
 )
 
+const (
+	maxBulkStringLength = 512 * 1024 * 1024 // 512 MiB
+	maxArrayLength      = 1_000_000
+)
+
 // Reader wraps a bufio.Reader for RESP parsing
 type Reader struct {
 	rd *bufio.Reader
@@ -125,6 +130,9 @@ func (r *Reader) readBulkString() (Value, error) {
 	if length < 0 {
 		return Value{}, fmt.Errorf("%w: negative bulk string length", ErrInvalidProtocol)
 	}
+	if length > maxBulkStringLength {
+		return Value{}, fmt.Errorf("%w: bulk string too large", ErrInvalidProtocol)
+	}
 
 	// Read the data + \r\n
 	data := make([]byte, length+2)
@@ -157,6 +165,9 @@ func (r *Reader) readArray() (Value, error) {
 
 	if count < 0 {
 		return Value{}, fmt.Errorf("%w: negative array length", ErrInvalidProtocol)
+	}
+	if count > maxArrayLength {
+		return Value{}, fmt.Errorf("%w: array too large", ErrInvalidProtocol)
 	}
 
 	array := make([]Value, count)

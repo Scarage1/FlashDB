@@ -80,6 +80,15 @@ func TestReader_EmptyBulkString(t *testing.T) {
 	assert.False(t, val.Null)
 }
 
+func TestReader_BulkStringTooLarge(t *testing.T) {
+	input := "$536870913\r\n"
+	r := NewReader(bytes.NewBufferString(input))
+
+	_, err := r.ReadValue()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidProtocol)
+}
+
 func TestReader_Array(t *testing.T) {
 	input := "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n"
 	r := NewReader(bytes.NewBufferString(input))
@@ -111,6 +120,15 @@ func TestReader_EmptyArray(t *testing.T) {
 	assert.Equal(t, byte(TypeArray), val.Type)
 	assert.Empty(t, val.Array)
 	assert.False(t, val.Null)
+}
+
+func TestReader_ArrayTooLarge(t *testing.T) {
+	input := "*1000001\r\n"
+	r := NewReader(bytes.NewBufferString(input))
+
+	_, err := r.ReadValue()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidProtocol)
 }
 
 func TestReader_NestedArray(t *testing.T) {
