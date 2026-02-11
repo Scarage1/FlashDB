@@ -5,7 +5,7 @@ import { Zap, Terminal, Database, BookOpen } from 'lucide-react';
 
 export default function Navbar() {
   const [scrolled, setScrolled] = useState(false);
-  const [connected, setConnected] = useState(true);
+  const connected = true;
 
   useEffect(() => {
     const handleScroll = () => {

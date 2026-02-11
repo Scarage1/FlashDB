@@ -16,6 +16,10 @@ const nextConfig = {
   // Production optimizations
   poweredByHeader: false,
   reactStrictMode: true,
+
+  turbopack: {
+    root: __dirname,
+  },
   
   // Image optimization
   images: {

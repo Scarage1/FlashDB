@@ -67,7 +67,7 @@ export default function Console() {
     }
   };
 
-  const formatResult = (result: any): string => {
+  const formatResult = (result: unknown): string => {
     if (result === null || result === undefined) return '(nil)';
     if (typeof result === 'object') return JSON.stringify(result, null, 2);
     return String(result);

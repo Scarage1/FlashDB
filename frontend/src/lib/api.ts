@@ -98,7 +98,7 @@ export async function executeCommand(command: string): Promise<CommandResponse> 
       return { error: data.error || 'Command failed' };
     }
     return { result: data.result };
-  } catch (error) {
+  } catch {
     return { error: 'Failed to connect to server' };
   }
 }
@@ -117,7 +117,7 @@ export async function getServerInfo(): Promise<ServerInfo> {
       ops: data.total_commands || 0,
       uptime: data.uptime || 0,
     };
-  } catch (error) {
+  } catch {
     return { keys: 0, memory: 0, ops: 0, uptime: 0 };
   }
 }
@@ -134,7 +134,7 @@ export async function getKeys(): Promise<string[]> {
     return keys
       .map((entry) => (typeof entry === 'string' ? entry : entry.key || ''))
       .filter((key) => key.length > 0);
-  } catch (error) {
+  } catch {
     return [];
   }
 }

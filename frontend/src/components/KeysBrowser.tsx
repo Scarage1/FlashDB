@@ -22,6 +22,11 @@ export default function KeysBrowser() {
   const [newKey, setNewKey] = useState({ name: '', value: '' });
   const { showToast } = useToast();
 
+  async function loadKeys() {
+    const data = await getKeys();
+    setKeys(data);
+  }
+
   useEffect(() => {
     loadKeys();
   }, []);
@@ -32,19 +37,26 @@ export default function KeysBrowser() {
     );
   }, [keys, search]);
 
-  const loadKeys = async () => {
-    const data = await getKeys();
-    setKeys(data);
-  };
-
   const selectKey = async (key: string) => {
     const valueRes = await executeCommand(`GET ${key}`);
     const ttlRes = await executeCommand(`TTL ${key}`);
-    
+
+    const value =
+      typeof valueRes.result === 'string'
+        ? valueRes.result
+        : valueRes.result == null
+        ? null
+        : JSON.stringify(valueRes.result);
+
+    const ttlValue =
+      typeof ttlRes.result === 'number'
+        ? ttlRes.result
+        : Number(ttlRes.result);
+
     setSelectedKey({
       key,
-      value: valueRes.result ?? null,
-      ttl: ttlRes.result ?? -1,
+      value,
+      ttl: Number.isFinite(ttlValue) ? ttlValue : -1,
       type: 'string',
     });
   };

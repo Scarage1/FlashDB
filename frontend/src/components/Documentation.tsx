@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Book, Zap, Target, Code, ArrowRight, X } from 'lucide-react';
+import { Book, Zap, Target, Code, ArrowRight } from 'lucide-react';
 import Modal from './Modal';
 
 interface DocCardProps {
@@ -37,7 +37,7 @@ export default function Documentation() {
       <h4 className="font-semibold text-gray-900">Getting Started with FlashDB</h4>
       <ol className="space-y-3 list-decimal list-inside">
         <li>Use the console above to execute commands directly</li>
-        <li>Create your first key: <code className="px-2 py-1 bg-gray-100 rounded text-sm">SET mykey "hello"</code></li>
+        <li>Create your first key: <code className="px-2 py-1 bg-gray-100 rounded text-sm">SET mykey &quot;hello&quot;</code></li>
         <li>Retrieve the value: <code className="px-2 py-1 bg-gray-100 rounded text-sm">GET mykey</code></li>
         <li>Explore the Keys Browser to manage your data visually</li>
         <li>Try the Feature Lab for guided operations</li>
@@ -67,7 +67,7 @@ export default function Documentation() {
         </div>
         <div className="p-3 bg-gray-50 rounded-lg">
           <code className="font-semibold text-blue-600">EXPIRE key seconds</code>
-          <p className="text-sm mt-1">Set a key's time to live in seconds</p>
+          <p className="text-sm mt-1">Set a key&apos;s time to live in seconds</p>
         </div>
         <div className="p-3 bg-gray-50 rounded-lg">
           <code className="font-semibold text-blue-600">ZADD key score member</code>
@@ -110,21 +110,21 @@ export default function Documentation() {
       <h4 className="font-semibold text-gray-900">HTTP API Endpoints</h4>
       <div className="space-y-3">
         <div className="p-3 bg-gray-50 rounded-lg">
-          <code className="font-semibold text-purple-600">POST /api/command</code>
+          <code className="font-semibold text-purple-600">POST /api/v1/execute</code>
           <p className="text-sm mt-1">Execute a FlashDB command</p>
         </div>
         <div className="p-3 bg-gray-50 rounded-lg">
-          <code className="font-semibold text-purple-600">GET /api/info</code>
+          <code className="font-semibold text-purple-600">GET /api/v1/stats</code>
           <p className="text-sm mt-1">Get server information</p>
         </div>
         <div className="p-3 bg-gray-50 rounded-lg">
-          <code className="font-semibold text-purple-600">GET /api/keys</code>
+          <code className="font-semibold text-purple-600">GET /api/v1/keys</code>
           <p className="text-sm mt-1">List all keys</p>
         </div>
       </div>
       <h4 className="font-semibold text-gray-900 mt-6">Example Request</h4>
       <pre className="p-4 bg-gray-900 text-green-400 rounded-lg text-sm overflow-x-auto">
-{`curl -X POST http://localhost:8080/api/command \\
+{`curl -X POST http://localhost:8080/api/v1/execute \\
   -H "Content-Type: application/json" \\
   -d '{"command": "SET mykey value"}'`}
       </pre>

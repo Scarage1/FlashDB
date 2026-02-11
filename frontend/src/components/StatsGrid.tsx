@@ -44,6 +44,19 @@ export default function StatsGrid() {
     uptime: '0s',
   });
 
+  function formatMemory(bytes?: number) {
+    if (!bytes) return '0 MB';
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  }
+
+  function formatUptime(seconds?: number) {
+    if (!seconds) return '0s';
+    if (seconds < 60) return `${seconds}s`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+    return `${Math.floor(seconds / 86400)}d`;
+  }
+
   useEffect(() => {
     const fetchStats = async () => {
       const info = await getServerInfo();
@@ -59,19 +72,6 @@ export default function StatsGrid() {
     const interval = setInterval(fetchStats, 5000);
     return () => clearInterval(interval);
   }, []);
-
-  const formatMemory = (bytes?: number) => {
-    if (!bytes) return '0 MB';
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-  };
-
-  const formatUptime = (seconds?: number) => {
-    if (!seconds) return '0s';
-    if (seconds < 60) return `${seconds}s`;
-    if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
-    return `${Math.floor(seconds / 86400)}d`;
-  };
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 max-w-6xl mx-auto px-6 pb-16">
