@@ -936,7 +936,13 @@ func (s *Server) cmdPersist(w *protocol.Writer, args []protocol.Value) {
 		return
 	}
 
-	if s.engine.Persist(args[0].Str) {
+	persisted, err := s.engine.Persist(args[0].Str)
+	if err != nil {
+		w.WriteError("internal error")
+		return
+	}
+
+	if persisted {
 		w.WriteInteger(1)
 	} else {
 		w.WriteInteger(0)

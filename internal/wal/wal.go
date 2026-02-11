@@ -19,6 +19,7 @@ const (
 	OpDelete     byte = 0x02
 	OpSetWithTTL byte = 0x03
 	OpExpire     byte = 0x04
+	OpPersist    byte = 0x05
 )
 
 // Header size: CRC32 (4) + Type (1) + KeyLen (4) + ValueLen (4) + TTL (8) = 21 bytes

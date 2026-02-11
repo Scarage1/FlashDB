@@ -119,14 +119,24 @@ func TestEngine_Persist(t *testing.T) {
 	walPath := filepath.Join(tmpDir, "test.wal")
 	e, err := New(walPath)
 	require.NoError(t, err)
-	defer e.Close()
 
 	e.SetWithTTL("key1", []byte("value1"), 1*time.Second)
 
-	ok := e.Persist("key1")
+	ok, err := e.Persist("key1")
+	require.NoError(t, err)
 	assert.True(t, ok)
 
 	ttl := e.TTL("key1")
+	assert.Equal(t, int64(-1), ttl)
+
+	require.NoError(t, e.Close())
+
+	// TTL removal must survive restart.
+	e2, err := New(walPath)
+	require.NoError(t, err)
+	defer e2.Close()
+
+	ttl = e2.TTL("key1")
 	assert.Equal(t, int64(-1), ttl)
 }
 

@@ -97,6 +97,8 @@ func (e *Engine) recover() error {
 					e.store.Expire(string(rec.Key), ttl)
 				}
 			}
+		case wal.OpPersist:
+			e.store.Persist(string(rec.Key))
 		}
 	}
 
@@ -272,11 +274,32 @@ func (e *Engine) PTTL(key string) int64 {
 }
 
 // Persist removes TTL from a key.
-func (e *Engine) Persist(key string) bool {
+func (e *Engine) Persist(key string) (bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	entry, exists := e.store.GetEntry(key)
+	if !exists || !entry.HasExpire {
+		e.recordCommand()
+		return false, nil
+	}
+
+	rec := wal.Record{
+		Type: wal.OpPersist,
+		Key:  []byte(key),
+	}
+	if err := e.wal.Append(rec); err != nil {
+		return false, fmt.Errorf("engine: failed to write WAL: %w", err)
+	}
+
+	persisted := e.store.Persist(key)
+	if persisted {
+		e.recordWrite()
+		return true, nil
+	}
+
 	e.recordCommand()
-	return e.store.Persist(key)
+	return false, nil
 }
 
 // Keys returns all keys in the store.
