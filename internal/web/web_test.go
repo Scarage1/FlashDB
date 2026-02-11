@@ -83,3 +83,45 @@ func TestVersionedKeyRoute(t *testing.T) {
 	assert.Equal(t, "mykey", info.Key)
 	assert.Equal(t, "value", info.Value)
 }
+
+func TestExecuteSortedSetCommands(t *testing.T) {
+	s := newTestWebServer(t)
+	handler := corsMiddleware(s.routes())
+
+	zaddResp := executeV1(t, handler, `{"command":"ZADD","args":["leaderboard","100","alice","200","bob"]}`)
+	require.True(t, zaddResp.Success)
+	added, ok := zaddResp.Result.(float64)
+	require.True(t, ok)
+	assert.Equal(t, 2.0, added)
+
+	zscoreResp := executeV1(t, handler, `{"command":"ZSCORE","args":["leaderboard","alice"]}`)
+	require.True(t, zscoreResp.Success)
+	assert.Equal(t, "100", zscoreResp.Result)
+
+	zrangeResp := executeV1(t, handler, `{"command":"ZRANGE","args":["leaderboard","0","-1","WITHSCORES"]}`)
+	require.True(t, zrangeResp.Success)
+	values, ok := zrangeResp.Result.([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"alice", "100", "bob", "200"}, values)
+
+	zrangeNoScoresResp := executeV1(t, handler, `{"command":"ZRANGE","args":["leaderboard","0","-1"]}`)
+	require.True(t, zrangeNoScoresResp.Success)
+	members, ok := zrangeNoScoresResp.Result.([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"alice", "bob"}, members)
+}
+
+func executeV1(t *testing.T, handler http.Handler, payload string) CommandResponse {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/execute", bytes.NewReader([]byte(payload)))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp CommandResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	return resp
+}

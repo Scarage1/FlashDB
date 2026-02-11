@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/flashdb/flashdb/internal/engine"
+	"github.com/flashdb/flashdb/internal/store"
 )
 
 //go:embed static/*
@@ -297,6 +298,63 @@ func (s *Server) executeCommand(cmd string, args []string) (interface{}, error) 
 			return nil, fmt.Errorf("value is not an integer")
 		}
 		return s.engine.IncrBy(args[0], delta)
+
+	case "ZADD":
+		if len(args) < 3 || (len(args)-1)%2 != 0 {
+			return nil, fmt.Errorf("wrong number of arguments for 'ZADD' command")
+		}
+		key := args[0]
+		members := make([]store.ScoredMember, 0, (len(args)-1)/2)
+		for i := 1; i < len(args); i += 2 {
+			score, err := strconv.ParseFloat(args[i], 64)
+			if err != nil {
+				return nil, fmt.Errorf("value is not a valid float")
+			}
+			members = append(members, store.ScoredMember{
+				Score:  score,
+				Member: args[i+1],
+			})
+		}
+		return s.engine.ZAdd(key, members...), nil
+
+	case "ZSCORE":
+		if len(args) != 2 {
+			return nil, fmt.Errorf("wrong number of arguments for 'ZSCORE' command")
+		}
+		score, exists := s.engine.ZScore(args[0], args[1])
+		if !exists {
+			return nil, nil
+		}
+		return strconv.FormatFloat(score, 'f', -1, 64), nil
+
+	case "ZRANGE":
+		if len(args) < 3 {
+			return nil, fmt.Errorf("wrong number of arguments for 'ZRANGE' command")
+		}
+		start, err := strconv.Atoi(args[1])
+		if err != nil {
+			return nil, fmt.Errorf("value is not an integer or out of range")
+		}
+		stop, err := strconv.Atoi(args[2])
+		if err != nil {
+			return nil, fmt.Errorf("value is not an integer or out of range")
+		}
+
+		withScores := len(args) > 3 && strings.EqualFold(args[3], "WITHSCORES")
+		members := s.engine.ZRange(args[0], start, stop, withScores)
+		if withScores {
+			result := make([]string, 0, len(members)*2)
+			for _, member := range members {
+				result = append(result, member.Member, strconv.FormatFloat(member.Score, 'f', -1, 64))
+			}
+			return result, nil
+		}
+
+		result := make([]string, 0, len(members))
+		for _, member := range members {
+			result = append(result, member.Member)
+		}
+		return result, nil
 
 	case "APPEND":
 		if len(args) != 2 {
