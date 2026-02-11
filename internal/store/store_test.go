@@ -79,3 +79,54 @@ func TestStore_ConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestStore_SetCopiesInput(t *testing.T) {
+	s := New()
+	defer s.Close()
+
+	source := []byte("value1")
+	s.Set("key1", source)
+	source[0] = 'X'
+
+	val, ok := s.Get("key1")
+	assert.True(t, ok)
+	assert.Equal(t, []byte("value1"), val)
+}
+
+func TestStore_GetEntryReturnsCopy(t *testing.T) {
+	s := New()
+	defer s.Close()
+
+	s.SetWithTTL("key1", []byte("value1"), 5*time.Second)
+	entry, ok := s.GetEntry("key1")
+	assert.True(t, ok)
+
+	// Mutate returned entry and ensure store state is unaffected.
+	entry.Value[0] = 'X'
+	entry.HasExpire = false
+
+	val, ok := s.Get("key1")
+	assert.True(t, ok)
+	assert.Equal(t, []byte("value1"), val)
+	assert.True(t, s.TTL("key1") > 0)
+}
+
+func TestStore_SetEntryCopiesInput(t *testing.T) {
+	s := New()
+	defer s.Close()
+
+	entry := &Entry{
+		Value:     []byte("value1"),
+		ExpireAt:  time.Now().Add(5 * time.Second),
+		HasExpire: true,
+	}
+	s.SetEntry("key1", entry)
+
+	entry.Value[0] = 'X'
+	entry.HasExpire = false
+
+	val, ok := s.Get("key1")
+	assert.True(t, ok)
+	assert.Equal(t, []byte("value1"), val)
+	assert.True(t, s.TTL("key1") > 0)
+}

@@ -22,6 +22,17 @@ type Store struct {
 	stopGC     chan struct{}
 }
 
+func cloneEntry(entry *Entry) *Entry {
+	cloned := &Entry{
+		ExpireAt:  entry.ExpireAt,
+		HasExpire: entry.HasExpire,
+	}
+	if entry.Value != nil {
+		cloned.Value = append([]byte(nil), entry.Value...)
+	}
+	return cloned
+}
+
 // New creates a new empty Store and starts the background expiration goroutine.
 func New() *Store {
 	s := &Store{
@@ -75,7 +86,7 @@ func (s *Store) isExpired(entry *Entry) bool {
 func (s *Store) Set(key string, value []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data[key] = &Entry{Value: value}
+	s.data[key] = &Entry{Value: append([]byte(nil), value...)}
 }
 
 // SetWithTTL stores a key-value pair with a TTL.
@@ -83,7 +94,7 @@ func (s *Store) SetWithTTL(key string, value []byte, ttl time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.data[key] = &Entry{
-		Value:     value,
+		Value:     append([]byte(nil), value...),
 		ExpireAt:  time.Now().Add(ttl),
 		HasExpire: true,
 	}
@@ -99,7 +110,7 @@ func (s *Store) SetNX(key string, value []byte) bool {
 		return false
 	}
 
-	s.data[key] = &Entry{Value: value}
+	s.data[key] = &Entry{Value: append([]byte(nil), value...)}
 	return true
 }
 
@@ -242,7 +253,7 @@ func (s *Store) Append(key string, value []byte) int {
 
 	entry, ok := s.data[key]
 	if !ok || s.isExpired(entry) {
-		s.data[key] = &Entry{Value: value}
+		s.data[key] = &Entry{Value: append([]byte(nil), value...)}
 		return len(value)
 	}
 
@@ -294,14 +305,14 @@ func (s *Store) GetEntry(key string) (*Entry, bool) {
 	if !ok || s.isExpired(entry) {
 		return nil, false
 	}
-	return entry, true
+	return cloneEntry(entry), true
 }
 
 // SetEntry sets a raw entry (used by engine for recovery).
 func (s *Store) SetEntry(key string, entry *Entry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data[key] = entry
+	s.data[key] = cloneEntry(entry)
 }
 
 // Helper functions for integer parsing
