@@ -507,6 +507,7 @@ func (s *Server) cmdSet(w *protocol.Writer, args []protocol.Value) {
 	// Parse optional arguments: EX seconds | PX milliseconds | NX | XX
 	var ttl time.Duration
 	nx, xx := false, false
+	expireOptionSet := false
 
 	for i := 2; i < len(args); i++ {
 		opt := strings.ToUpper(args[i].Str)
@@ -516,15 +517,24 @@ func (s *Server) cmdSet(w *protocol.Writer, args []protocol.Value) {
 				w.WriteError("syntax error")
 				return
 			}
+			if expireOptionSet {
+				w.WriteError("syntax error")
+				return
+			}
 			seconds, err := strconv.ParseInt(args[i+1].Str, 10, 64)
 			if err != nil || seconds <= 0 {
 				w.WriteError("invalid expire time")
 				return
 			}
 			ttl = time.Duration(seconds) * time.Second
+			expireOptionSet = true
 			i++
 		case "PX":
 			if i+1 >= len(args) {
+				w.WriteError("syntax error")
+				return
+			}
+			if expireOptionSet {
 				w.WriteError("syntax error")
 				return
 			}
@@ -534,11 +544,23 @@ func (s *Server) cmdSet(w *protocol.Writer, args []protocol.Value) {
 				return
 			}
 			ttl = time.Duration(millis) * time.Millisecond
+			expireOptionSet = true
 			i++
 		case "NX":
+			if nx {
+				w.WriteError("syntax error")
+				return
+			}
 			nx = true
 		case "XX":
+			if xx {
+				w.WriteError("syntax error")
+				return
+			}
 			xx = true
+		default:
+			w.WriteError("syntax error")
+			return
 		}
 	}
 
@@ -1873,12 +1895,15 @@ func (s *Server) cmdGetEx(w *protocol.Writer, args []protocol.Value) {
 		return
 	}
 
+	action := ""
+	var ttl time.Duration
+
 	// Parse options
 	for i := 1; i < len(args); i++ {
 		opt := strings.ToUpper(args[i].Str)
 		switch opt {
 		case "EX":
-			if i+1 >= len(args) {
+			if i+1 >= len(args) || action != "" {
 				w.WriteError("syntax error")
 				return
 			}
@@ -1887,10 +1912,11 @@ func (s *Server) cmdGetEx(w *protocol.Writer, args []protocol.Value) {
 				w.WriteError("invalid expire time")
 				return
 			}
-			s.engine.SetWithTTL(key, value, time.Duration(seconds)*time.Second)
+			ttl = time.Duration(seconds) * time.Second
+			action = "expire"
 			i++
 		case "PX":
-			if i+1 >= len(args) {
+			if i+1 >= len(args) || action != "" {
 				w.WriteError("syntax error")
 				return
 			}
@@ -1899,10 +1925,11 @@ func (s *Server) cmdGetEx(w *protocol.Writer, args []protocol.Value) {
 				w.WriteError("invalid expire time")
 				return
 			}
-			s.engine.SetWithTTL(key, value, time.Duration(millis)*time.Millisecond)
+			ttl = time.Duration(millis) * time.Millisecond
+			action = "expire"
 			i++
 		case "EXAT":
-			if i+1 >= len(args) {
+			if i+1 >= len(args) || action != "" {
 				w.WriteError("syntax error")
 				return
 			}
@@ -1911,13 +1938,15 @@ func (s *Server) cmdGetEx(w *protocol.Writer, args []protocol.Value) {
 				w.WriteError("invalid expire time")
 				return
 			}
-			ttl := time.Until(time.Unix(timestamp, 0))
-			if ttl > 0 {
-				s.engine.SetWithTTL(key, value, ttl)
+			ttl = time.Until(time.Unix(timestamp, 0))
+			if ttl <= 0 {
+				action = "delete"
+			} else {
+				action = "expire"
 			}
 			i++
 		case "PXAT":
-			if i+1 >= len(args) {
+			if i+1 >= len(args) || action != "" {
 				w.WriteError("syntax error")
 				return
 			}
@@ -1926,14 +1955,40 @@ func (s *Server) cmdGetEx(w *protocol.Writer, args []protocol.Value) {
 				w.WriteError("invalid expire time")
 				return
 			}
-			ttl := time.Until(time.UnixMilli(timestamp))
-			if ttl > 0 {
-				s.engine.SetWithTTL(key, value, ttl)
+			ttl = time.Until(time.UnixMilli(timestamp))
+			if ttl <= 0 {
+				action = "delete"
+			} else {
+				action = "expire"
 			}
 			i++
 		case "PERSIST":
-			// Re-set without TTL to remove expiration
-			s.engine.Set(key, value)
+			if action != "" {
+				w.WriteError("syntax error")
+				return
+			}
+			action = "persist"
+		default:
+			w.WriteError("syntax error")
+			return
+		}
+	}
+
+	switch action {
+	case "expire":
+		if _, err := s.engine.Expire(key, ttl); err != nil {
+			w.WriteError("internal error")
+			return
+		}
+	case "persist":
+		if _, err := s.engine.Persist(key); err != nil {
+			w.WriteError("internal error")
+			return
+		}
+	case "delete":
+		if _, err := s.engine.Delete(key); err != nil {
+			w.WriteError("internal error")
+			return
 		}
 	}
 

@@ -542,6 +542,47 @@ func TestServer_PubSub(t *testing.T) {
 	assert.Equal(t, "0", resp)
 }
 
+func TestServer_SET_SyntaxValidation(t *testing.T) {
+	s, _ := setupTestServer(t)
+	addr := startTestServer(t, s)
+
+	resp := sendCommand(t, addr, "SET", "k", "v", "UNKNOWN")
+	assert.Contains(t, resp, "ERR")
+
+	resp = sendCommand(t, addr, "SET", "k", "v", "EX", "10", "PX", "100")
+	assert.Contains(t, resp, "ERR")
+}
+
+func TestServer_GETEX_OptionSemantics(t *testing.T) {
+	s, _ := setupTestServer(t)
+	addr := startTestServer(t, s)
+
+	sendCommand(t, addr, "SETEX", "mykey", "10", "value")
+
+	resp := sendCommand(t, addr, "GETEX", "mykey", "PERSIST")
+	assert.Equal(t, "value", resp)
+
+	ttl := sendCommand(t, addr, "TTL", "mykey")
+	assert.Equal(t, "-1", ttl)
+
+	resp = sendCommand(t, addr, "GETEX", "mykey", "EX", "10", "PERSIST")
+	assert.Contains(t, resp, "ERR")
+}
+
+func TestServer_GETEX_PastEXATDeletesKey(t *testing.T) {
+	s, _ := setupTestServer(t)
+	addr := startTestServer(t, s)
+
+	sendCommand(t, addr, "SET", "pastkey", "value")
+
+	past := fmt.Sprintf("%d", time.Now().Add(-time.Second).Unix())
+	resp := sendCommand(t, addr, "GETEX", "pastkey", "EXAT", past)
+	assert.Equal(t, "value", resp)
+
+	exists := sendCommand(t, addr, "EXISTS", "pastkey")
+	assert.Equal(t, "0", exists)
+}
+
 func TestWALFilePath(t *testing.T) {
 	tmpDir := t.TempDir()
 	walPath := filepath.Join(tmpDir, "test.wal")
