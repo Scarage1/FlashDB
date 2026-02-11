@@ -1,0 +1,209 @@
+openapi: 3.0.3
+info:
+  title: FlashDB HTTP API
+  version: 1.0.0
+  description: |
+    Versioned HTTP API for FlashDB administrative operations.
+servers:
+  - url: http://localhost:8080
+paths:
+  /api/v1/execute:
+    post:
+      summary: Execute a FlashDB command
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '200':
+          description: Command response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandResponse'
+  /api/v1/stats:
+    get:
+      summary: Fetch server statistics
+      responses:
+        '200':
+          description: Current server stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsResponse'
+  /api/v1/keys:
+    get:
+      summary: List keys
+      parameters:
+        - in: query
+          name: pattern
+          schema:
+            type: string
+            default: '*'
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            default: 100
+      responses:
+        '200':
+          description: Keys list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/KeyInfo'
+                  total:
+                    type: integer
+                required: [keys, total]
+  /api/v1/key/{key}:
+    get:
+      summary: Get one key
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Key details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeyInfo'
+        '404':
+          description: Key not found
+    delete:
+      summary: Delete one key
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Delete result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                required: [success]
+  /api/v1/healthz:
+    get:
+      summary: Liveness check
+      responses:
+        '200':
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /api/v1/readyz:
+    get:
+      summary: Readiness check
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '503':
+          description: Service is not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+components:
+  schemas:
+    CommandRequest:
+      type: object
+      properties:
+        command:
+          type: string
+        args:
+          type: array
+          items:
+            type: string
+      required: [command]
+    CommandResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        result:
+          nullable: true
+        error:
+          type: string
+        type:
+          type: string
+      required: [success]
+    StatsResponse:
+      type: object
+      properties:
+        version:
+          type: string
+        uptime:
+          type: integer
+        uptime_human:
+          type: string
+        keys:
+          type: integer
+        memory_used:
+          type: integer
+        memory_used_mb:
+          type: number
+        goroutines:
+          type: integer
+        cpus:
+          type: integer
+        total_commands:
+          type: integer
+      required:
+        - version
+        - uptime
+        - keys
+        - memory_used
+        - total_commands
+    KeyInfo:
+      type: object
+      properties:
+        key:
+          type: string
+        type:
+          type: string
+        ttl:
+          type: integer
+        value:
+          type: string
+      required: [key, type, ttl]
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        time:
+          type: string
+      required: [status, time]
+    ReadyResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ready
+        ready:
+          type: boolean
+      required: [status, ready]

@@ -300,6 +300,7 @@ flashdb/
 ├── docs/                     # Documentation
 │   ├── ARCHITECTURE.md
 │   ├── COMMANDS.md
+│   ├── OPENAPI.yaml
 │   ├── PROTOCOL.md
 │   └── WAL.md
 ├── go.mod
@@ -331,6 +332,7 @@ Detailed documentation available in the `/docs` folder:
 
 - [**Architecture**](docs/ARCHITECTURE.md) — System design and component overview
 - [**Commands**](docs/COMMANDS.md) — Complete command reference
+- [**OpenAPI**](docs/OPENAPI.yaml) — Versioned HTTP API contract (`/api/v1`)
 - [**Protocol**](docs/PROTOCOL.md) — RESP protocol implementation details
 - [**WAL**](docs/WAL.md) — Write-ahead log and persistence
 

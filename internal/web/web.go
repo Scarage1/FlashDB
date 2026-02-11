@@ -30,6 +30,8 @@ type Server struct {
 	mu        sync.RWMutex
 }
 
+const apiVersionPath = "/api/v1"
+
 // New creates a new web server.
 func New(addr string, engine *engine.Engine) *Server {
 	return &Server{
@@ -76,13 +78,7 @@ type KeyInfo struct {
 
 // Start starts the web server.
 func (s *Server) Start(ctx context.Context) error {
-	mux := http.NewServeMux()
-
-	// API routes
-	mux.HandleFunc("/api/execute", s.handleExecute)
-	mux.HandleFunc("/api/stats", s.handleStats)
-	mux.HandleFunc("/api/keys", s.handleKeys)
-	mux.HandleFunc("/api/key/", s.handleKey)
+	mux := s.routes()
 
 	// Serve static files
 	staticFS, err := fs.Sub(staticFiles, "static")
@@ -107,6 +103,30 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) routes() *http.ServeMux {
+	mux := http.NewServeMux()
+
+	// Legacy API routes (kept for backward compatibility)
+	mux.HandleFunc("/api/execute", s.handleExecute)
+	mux.HandleFunc("/api/stats", s.handleStats)
+	mux.HandleFunc("/api/keys", s.handleKeys)
+	mux.HandleFunc("/api/key/", s.handleKey)
+
+	// Versioned API routes (contract-first API surface)
+	mux.HandleFunc(apiVersionPath+"/execute", s.handleExecute)
+	mux.HandleFunc(apiVersionPath+"/stats", s.handleStats)
+	mux.HandleFunc(apiVersionPath+"/keys", s.handleKeys)
+	mux.HandleFunc(apiVersionPath+"/key/", s.handleKeyV1)
+
+	// Health endpoints
+	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/readyz", s.handleReady)
+	mux.HandleFunc(apiVersionPath+"/healthz", s.handleHealth)
+	mux.HandleFunc(apiVersionPath+"/readyz", s.handleReady)
+
+	return mux
 }
 
 // corsMiddleware adds CORS headers.
@@ -417,6 +437,50 @@ func (s *Server) handleKey(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleKeyV1 handles versioned individual key operations.
+func (s *Server) handleKeyV1(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimPrefix(r.URL.Path, apiVersionPath+"/key/")
+	if key == "" {
+		http.Error(w, "Key required", http.StatusBadRequest)
+		return
+	}
+
+	// Rewrite to legacy path and delegate to the existing handler.
+	r.URL.Path = "/api/key/" + key
+	s.handleKey(w, r)
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"status": "ok",
+		"time":   time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ready := s.engine != nil
+	statusCode := http.StatusOK
+	status := "ready"
+	if !ready {
+		statusCode = http.StatusServiceUnavailable
+		status = "not_ready"
+	}
+	writeJSONWithStatus(w, statusCode, map[string]interface{}{
+		"status": status,
+		"ready":  ready,
+	})
+}
+
 // filterKeys filters keys by glob pattern.
 func filterKeys(keys []string, pattern string) []string {
 	if pattern == "*" {
@@ -489,6 +553,12 @@ func parseCommand(input string) []string {
 // writeJSON writes a JSON response.
 func writeJSON(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(data)
+}
+
+func writeJSONWithStatus(w http.ResponseWriter, status int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
 }
 

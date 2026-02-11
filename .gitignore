@@ -27,6 +27,7 @@ coverage.out
 
 # Dependency directories
 vendor/
+/.gocache/
 
 # Frontend
 frontend/node_modules/
