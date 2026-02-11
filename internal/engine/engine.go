@@ -5,6 +5,7 @@ package engine
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/flashdb/flashdb/internal/store"
@@ -27,7 +28,12 @@ type Engine struct {
 	mu    sync.RWMutex
 	store *store.Store
 	wal   *wal.WAL
-	stats Stats
+
+	startTime     time.Time
+	totalCommands atomic.Int64
+	totalReads    atomic.Int64
+	totalWrites   atomic.Int64
+	expiredKeys   atomic.Int64
 }
 
 // New creates a new Engine with the specified WAL path.
@@ -40,9 +46,9 @@ func New(walPath string) (*Engine, error) {
 
 	s := store.New()
 	e := &Engine{
-		store: s,
-		wal:   w,
-		stats: Stats{StartTime: time.Now()},
+		store:     s,
+		wal:       w,
+		startTime: time.Now(),
 	}
 
 	// Recover from WAL
@@ -97,6 +103,20 @@ func (e *Engine) recover() error {
 	return nil
 }
 
+func (e *Engine) recordRead() {
+	e.totalReads.Add(1)
+	e.totalCommands.Add(1)
+}
+
+func (e *Engine) recordWrite() {
+	e.totalWrites.Add(1)
+	e.totalCommands.Add(1)
+}
+
+func (e *Engine) recordCommand() {
+	e.totalCommands.Add(1)
+}
+
 // Set stores a key-value pair.
 // The operation is persisted to WAL before being applied.
 func (e *Engine) Set(key string, value []byte) error {
@@ -113,8 +133,7 @@ func (e *Engine) Set(key string, value []byte) error {
 	}
 
 	e.store.Set(key, value)
-	e.stats.TotalWrites++
-	e.stats.TotalCommands++
+	e.recordWrite()
 	return nil
 }
 
@@ -135,8 +154,7 @@ func (e *Engine) SetWithTTL(key string, value []byte, ttl time.Duration) error {
 	}
 
 	e.store.SetWithTTL(key, value, ttl)
-	e.stats.TotalWrites++
-	e.stats.TotalCommands++
+	e.recordWrite()
 	return nil
 }
 
@@ -146,7 +164,7 @@ func (e *Engine) SetNX(key string, value []byte) (bool, error) {
 	defer e.mu.Unlock()
 
 	if e.store.Exists(key) {
-		e.stats.TotalCommands++
+		e.recordCommand()
 		return false, nil
 	}
 
@@ -160,8 +178,7 @@ func (e *Engine) SetNX(key string, value []byte) (bool, error) {
 	}
 
 	e.store.Set(key, value)
-	e.stats.TotalWrites++
-	e.stats.TotalCommands++
+	e.recordWrite()
 	return true, nil
 }
 
@@ -170,8 +187,7 @@ func (e *Engine) SetNX(key string, value []byte) (bool, error) {
 func (e *Engine) Get(key string) ([]byte, bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 	return e.store.Get(key)
 }
 
@@ -183,7 +199,7 @@ func (e *Engine) Delete(key string) (bool, error) {
 
 	exists := e.store.Exists(key)
 	if !exists {
-		e.stats.TotalCommands++
+		e.recordCommand()
 		return false, nil
 	}
 
@@ -197,8 +213,7 @@ func (e *Engine) Delete(key string) (bool, error) {
 	}
 
 	e.store.Delete(key)
-	e.stats.TotalWrites++
-	e.stats.TotalCommands++
+	e.recordWrite()
 	return true, nil
 }
 
@@ -206,8 +221,7 @@ func (e *Engine) Delete(key string) (bool, error) {
 func (e *Engine) Exists(key string) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 	return e.store.Exists(key)
 }
 
@@ -217,7 +231,7 @@ func (e *Engine) Expire(key string, ttl time.Duration) (bool, error) {
 	defer e.mu.Unlock()
 
 	if !e.store.Exists(key) {
-		e.stats.TotalCommands++
+		e.recordCommand()
 		return false, nil
 	}
 
@@ -232,8 +246,7 @@ func (e *Engine) Expire(key string, ttl time.Duration) (bool, error) {
 	}
 
 	e.store.Expire(key, ttl)
-	e.stats.TotalWrites++
-	e.stats.TotalCommands++
+	e.recordWrite()
 	return true, nil
 }
 
@@ -242,8 +255,7 @@ func (e *Engine) Expire(key string, ttl time.Duration) (bool, error) {
 func (e *Engine) TTL(key string) int64 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 
 	ttl := e.store.TTL(key)
 	return int64(ttl.Seconds())
@@ -253,8 +265,7 @@ func (e *Engine) TTL(key string) int64 {
 func (e *Engine) PTTL(key string) int64 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 
 	ttl := e.store.TTL(key)
 	return ttl.Milliseconds()
@@ -264,7 +275,7 @@ func (e *Engine) PTTL(key string) int64 {
 func (e *Engine) Persist(key string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.stats.TotalCommands++
+	e.recordCommand()
 	return e.store.Persist(key)
 }
 
@@ -272,8 +283,7 @@ func (e *Engine) Persist(key string) bool {
 func (e *Engine) Keys() []string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 	return e.store.Keys()
 }
 
@@ -281,8 +291,7 @@ func (e *Engine) Keys() []string {
 func (e *Engine) Size() int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 	return e.store.Size()
 }
 
@@ -305,8 +314,7 @@ func (e *Engine) Append(key string, value []byte) (int, error) {
 	}
 
 	length := e.store.Append(key, value)
-	e.stats.TotalWrites++
-	e.stats.TotalCommands++
+	e.recordWrite()
 	return length, nil
 }
 
@@ -314,8 +322,7 @@ func (e *Engine) Append(key string, value []byte) (int, error) {
 func (e *Engine) StrLen(key string) int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 	return e.store.StrLen(key)
 }
 
@@ -326,7 +333,7 @@ func (e *Engine) IncrBy(key string, delta int64) (int64, error) {
 
 	newVal, err := e.store.IncrBy(key, delta)
 	if err != nil {
-		e.stats.TotalCommands++
+		e.recordCommand()
 		return 0, err
 	}
 
@@ -339,8 +346,7 @@ func (e *Engine) IncrBy(key string, delta int64) (int64, error) {
 		return 0, fmt.Errorf("engine: failed to write WAL: %w", err)
 	}
 
-	e.stats.TotalWrites++
-	e.stats.TotalCommands++
+	e.recordWrite()
 	return newVal, nil
 }
 
@@ -354,8 +360,7 @@ func (e *Engine) Clear() error {
 	}
 
 	e.store.Clear()
-	e.stats.TotalWrites++
-	e.stats.TotalCommands++
+	e.recordWrite()
 	return nil
 }
 
@@ -363,9 +368,14 @@ func (e *Engine) Clear() error {
 func (e *Engine) GetStats() Stats {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	stats := e.stats
-	stats.KeysCount = e.store.Size()
-	return stats
+	return Stats{
+		TotalCommands: e.totalCommands.Load(),
+		TotalReads:    e.totalReads.Load(),
+		TotalWrites:   e.totalWrites.Load(),
+		StartTime:     e.startTime,
+		KeysCount:     e.store.Size(),
+		ExpiredKeys:   e.expiredKeys.Load(),
+	}
 }
 
 // Close closes the engine and its underlying WAL.
@@ -388,8 +398,7 @@ func (e *Engine) ZAdd(key string, members ...store.ScoredMember) int {
 	// Note: Sorted sets are currently in-memory only (not persisted to WAL)
 	// For persistence, we'd need to add new WAL op types
 	result := e.store.ZAdd(key, members...)
-	e.stats.TotalWrites++
-	e.stats.TotalCommands++
+	e.recordWrite()
 	return result
 }
 
@@ -398,8 +407,7 @@ func (e *Engine) ZScore(key, member string) (float64, bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 	return e.store.ZScore(key, member)
 }
 
@@ -409,8 +417,7 @@ func (e *Engine) ZRem(key string, members ...string) int {
 	defer e.mu.Unlock()
 
 	result := e.store.ZRem(key, members...)
-	e.stats.TotalWrites++
-	e.stats.TotalCommands++
+	e.recordWrite()
 	return result
 }
 
@@ -419,8 +426,7 @@ func (e *Engine) ZCard(key string) int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 	return e.store.ZCard(key)
 }
 
@@ -429,8 +435,7 @@ func (e *Engine) ZRank(key, member string) (int, bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 	return e.store.ZRank(key, member)
 }
 
@@ -439,8 +444,7 @@ func (e *Engine) ZRevRank(key, member string) (int, bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 	return e.store.ZRevRank(key, member)
 }
 
@@ -449,8 +453,7 @@ func (e *Engine) ZRange(key string, start, stop int, withScores bool) []store.Sc
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 	return e.store.ZRange(key, start, stop, withScores)
 }
 
@@ -459,8 +462,7 @@ func (e *Engine) ZRevRange(key string, start, stop int, withScores bool) []store
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 	return e.store.ZRevRange(key, start, stop, withScores)
 }
 
@@ -469,8 +471,7 @@ func (e *Engine) ZRangeByScore(key string, min, max float64, withScores bool, of
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 	return e.store.ZRangeByScore(key, min, max, withScores, offset, count)
 }
 
@@ -479,8 +480,7 @@ func (e *Engine) ZRevRangeByScore(key string, max, min float64, withScores bool,
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 	return e.store.ZRevRangeByScore(key, max, min, withScores, offset, count)
 }
 
@@ -489,8 +489,7 @@ func (e *Engine) ZCount(key string, min, max float64) int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	e.stats.TotalReads++
-	e.stats.TotalCommands++
+	e.recordRead()
 	return e.store.ZCount(key, min, max)
 }
 
@@ -500,8 +499,7 @@ func (e *Engine) ZIncrBy(key, member string, increment float64) float64 {
 	defer e.mu.Unlock()
 
 	result := e.store.ZIncrBy(key, member, increment)
-	e.stats.TotalWrites++
-	e.stats.TotalCommands++
+	e.recordWrite()
 	return result
 }
 
@@ -511,8 +509,7 @@ func (e *Engine) ZRemRangeByRank(key string, start, stop int) int {
 	defer e.mu.Unlock()
 
 	result := e.store.ZRemRangeByRank(key, start, stop)
-	e.stats.TotalWrites++
-	e.stats.TotalCommands++
+	e.recordWrite()
 	return result
 }
 
@@ -522,8 +519,7 @@ func (e *Engine) ZRemRangeByScore(key string, min, max float64) int {
 	defer e.mu.Unlock()
 
 	result := e.store.ZRemRangeByScore(key, min, max)
-	e.stats.TotalWrites++
-	e.stats.TotalCommands++
+	e.recordWrite()
 	return result
 }
 
@@ -533,8 +529,7 @@ func (e *Engine) ZPopMin(key string, count int) []store.ScoredMember {
 	defer e.mu.Unlock()
 
 	result := e.store.ZPopMin(key, count)
-	e.stats.TotalWrites++
-	e.stats.TotalCommands++
+	e.recordWrite()
 	return result
 }
 
@@ -544,7 +539,6 @@ func (e *Engine) ZPopMax(key string, count int) []store.ScoredMember {
 	defer e.mu.Unlock()
 
 	result := e.store.ZPopMax(key, count)
-	e.stats.TotalWrites++
-	e.stats.TotalCommands++
+	e.recordWrite()
 	return result
 }
