@@ -4,14 +4,20 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"math"
+	"math/rand"
 	"net"
+	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,10 +27,31 @@ import (
 	"github.com/flashdb/flashdb/internal/engine"
 	"github.com/flashdb/flashdb/internal/protocol"
 	"github.com/flashdb/flashdb/internal/store"
+	"github.com/flashdb/flashdb/internal/version"
 )
 
 // Version is the FlashDB version string.
-const Version = "1.0.0"
+var Version = version.Version
+
+// ACLUser represents a user in the ACL system.
+type ACLUser struct {
+	Username    string
+	Password    string // plaintext for Redis compat (compared constant-time)
+	Enabled     bool
+	AllCommands bool     // true = unrestricted
+	AllowedCmds []string // if AllCommands is false, whitelist
+	ReadOnly    bool     // true = only read commands allowed
+}
+
+// slowLogEntry records a command that exceeded the latency threshold.
+type slowLogEntry struct {
+	ID        int64
+	Timestamp time.Time
+	Duration  time.Duration
+	Client    string
+	Cmd       string
+	Args      []string
+}
 
 // Config holds server configuration.
 type Config struct {
@@ -32,15 +59,35 @@ type Config struct {
 	MaxClients int
 	Timeout    time.Duration
 	LogLevel   string
+
+	// TLS
+	TLSCertFile string
+	TLSKeyFile  string
+
+	// ACL — when Users is non-empty, per-user auth is used instead of Password.
+	Users []ACLUser
+
+	// Rate limiting — max commands per second per client (0 = unlimited).
+	RateLimit int
+
+	// Slow query log — commands slower than this are recorded (0 = disabled).
+	SlowLogThreshold time.Duration
+	SlowLogMaxLen    int
+
+	// Web API token (shared secret for HTTP endpoints, empty = no auth).
+	APIToken string
 }
 
 // DefaultConfig returns default server configuration.
 func DefaultConfig() Config {
 	return Config{
-		Password:   "",
-		MaxClients: 10000,
-		Timeout:    0,
-		LogLevel:   "info",
+		Password:         "",
+		MaxClients:       10000,
+		Timeout:          0,
+		LogLevel:         "info",
+		SlowLogMaxLen:    128,
+		SlowLogThreshold: 0,
+		RateLimit:        0,
 	}
 }
 
@@ -60,6 +107,11 @@ type clientConn struct {
 	// Pub/Sub state
 	subscriptions  map[string]bool
 	psubscriptions map[string]bool
+	// ACL state
+	aclUser *ACLUser // nil when legacy single-password mode
+	// Rate limiting state
+	rateBucket  int64 // remaining tokens this second
+	rateResetAt time.Time
 }
 
 // queuedCommand represents a command queued during MULTI
@@ -99,6 +151,12 @@ type Server struct {
 	totalCmds  int64
 	totalConns int64
 	pubsub     *PubSub
+	// Slow query log
+	slowLog   []slowLogEntry
+	slowLogMu sync.Mutex
+	slowLogID int64
+	// Structured logger
+	logger *slog.Logger
 }
 
 // New creates a new Server with the specified address and engine.
@@ -108,6 +166,20 @@ func New(addr string, e *engine.Engine) *Server {
 
 // NewWithConfig creates a new Server with the specified configuration.
 func NewWithConfig(addr string, e *engine.Engine, cfg Config) *Server {
+	// Build structured logger based on configured level.
+	var level slog.Level
+	switch strings.ToLower(cfg.LogLevel) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn", "warning":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+	logger := slog.New(slog.NewJSONHandler(log.Writer(), &slog.HandlerOptions{Level: level}))
+
 	return &Server{
 		addr:      addr,
 		engine:    e,
@@ -115,24 +187,45 @@ func NewWithConfig(addr string, e *engine.Engine, cfg Config) *Server {
 		clients:   make(map[int64]*clientConn),
 		startTime: time.Now(),
 		pubsub:    NewPubSub(),
+		logger:    logger,
 	}
 }
 
 // Start starts the server and listens for connections.
 // It blocks until the context is cancelled.
 func (s *Server) Start(ctx context.Context) error {
-	listener, err := net.Listen("tcp", s.addr)
+	addr, err := net.ResolveTCPAddr("tcp", s.addr)
+	if err != nil {
+		return fmt.Errorf("server: failed to resolve address: %w", err)
+	}
+	tcpListener, err := net.ListenTCP("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("server: failed to listen: %w", err)
+	}
+
+	// Optionally wrap with TLS.
+	var listener net.Listener = tcpListener
+	if s.config.TLSCertFile != "" && s.config.TLSKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(s.config.TLSCertFile, s.config.TLSKeyFile)
+		if err != nil {
+			tcpListener.Close()
+			return fmt.Errorf("server: failed to load TLS certificate: %w", err)
+		}
+		tlsCfg := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+		listener = tls.NewListener(tcpListener, tlsCfg)
+		s.logger.Info("TLS enabled", "cert", s.config.TLSCertFile)
 	}
 
 	s.mu.Lock()
 	s.listener = listener
 	s.mu.Unlock()
 
-	log.Printf("FlashDB server listening on %s", s.addr)
-	if s.config.Password != "" {
-		log.Printf("Authentication enabled")
+	s.logger.Info("FlashDB server listening", "addr", s.addr)
+	if s.config.Password != "" || len(s.config.Users) > 0 {
+		s.logger.Info("Authentication enabled")
 	}
 
 	// Handle context cancellation
@@ -151,8 +244,15 @@ func (s *Server) Start(ctx context.Context) error {
 			if closed {
 				return nil
 			}
-			log.Printf("server: failed to accept connection: %v", err)
+			s.logger.Error("failed to accept connection", "error", err)
 			continue
+		}
+
+		// TCP socket tuning — works for plain TCP and TLS-wrapped conns.
+		if tc, ok := conn.(*net.TCPConn); ok {
+			tc.SetNoDelay(true)
+			tc.SetKeepAlive(true)
+			tc.SetKeepAlivePeriod(5 * time.Minute)
 		}
 
 		// Check max clients
@@ -162,11 +262,12 @@ func (s *Server) Start(ctx context.Context) error {
 
 		if s.config.MaxClients > 0 && currentClients >= s.config.MaxClients {
 			conn.Close()
-			log.Printf("server: max clients reached, rejecting connection")
+			s.logger.Warn("max clients reached, rejecting connection")
 			continue
 		}
 
 		// Create client connection
+		noAuth := s.config.Password == "" && len(s.config.Users) == 0
 		s.mu.Lock()
 		s.nextConnID++
 		connID := s.nextConnID
@@ -174,7 +275,7 @@ func (s *Server) Start(ctx context.Context) error {
 			id:             connID,
 			conn:           conn,
 			addr:           conn.RemoteAddr().String(),
-			authenticated:  s.config.Password == "", // Auto-auth if no password
+			authenticated:  noAuth,
 			createdAt:      time.Now(),
 			lastCommand:    time.Now(),
 			subscriptions:  make(map[string]bool),
@@ -257,22 +358,103 @@ func (s *Server) handleConnection(ctx context.Context, client *clientConn) {
 			continue
 		}
 
-		// Extract command and args
-		cmd := strings.ToUpper(val.Array[0].Str)
-		args := val.Array[1:]
-
-		// Update client stats
-		client.lastCommand = time.Now()
-		atomic.AddInt64(&client.cmdCount, 1)
-		atomic.AddInt64(&s.totalCmds, 1)
-
-		// Check authentication for non-AUTH commands
-		if !client.authenticated && cmd != "AUTH" && cmd != "PING" && cmd != "QUIT" {
-			writer.WriteError("NOAUTH Authentication required")
-			continue
+		// If more data is already buffered, enter pipeline mode:
+		// disable per-command flush, drain all buffered commands,
+		// then flush the entire batch in one syscall.
+		pipelined := reader.Buffered() > 0
+		if pipelined {
+			writer.SetAutoFlush(false)
 		}
 
-		s.executeCommand(writer, client, cmd, args)
+		s.dispatchCommand(writer, client, val)
+
+		// Drain any remaining pipelined commands
+		for pipelined && reader.Buffered() > 0 {
+			val, err = reader.ReadValue()
+			if err != nil {
+				break
+			}
+			if val.Type != protocol.TypeArray || len(val.Array) == 0 {
+				writer.WriteError("invalid command format")
+				continue
+			}
+			s.dispatchCommand(writer, client, val)
+		}
+
+		if pipelined {
+			writer.SetAutoFlush(true)
+			writer.Flush()
+		}
+	}
+}
+
+// dispatchCommand parses a RESP array value into command + args and executes it.
+// It enforces rate limiting, ACL, slow-log recording, and audit logging.
+func (s *Server) dispatchCommand(w *protocol.Writer, client *clientConn, val protocol.Value) {
+	cmd := strings.ToUpper(val.Array[0].Str)
+	args := val.Array[1:]
+
+	// Update client stats
+	now := time.Now()
+	client.lastCommand = now
+	atomic.AddInt64(&client.cmdCount, 1)
+	atomic.AddInt64(&s.totalCmds, 1)
+
+	// --- Rate limiting (token-bucket, 1-second window) ---
+	if s.config.RateLimit > 0 {
+		if now.After(client.rateResetAt) {
+			client.rateBucket = int64(s.config.RateLimit)
+			client.rateResetAt = now.Add(time.Second)
+		}
+		if client.rateBucket <= 0 {
+			w.WriteError("ERR rate limit exceeded, try again later")
+			return
+		}
+		client.rateBucket--
+	}
+
+	// --- Authentication check ---
+	if !client.authenticated && cmd != "AUTH" && cmd != "PING" && cmd != "QUIT" {
+		w.WriteError("NOAUTH Authentication required")
+		return
+	}
+
+	// --- ACL permission check ---
+	if client.aclUser != nil && !client.aclUser.AllCommands {
+		if !s.aclAllowed(client.aclUser, cmd) {
+			w.WriteError(fmt.Sprintf("NOPERM this user has no permissions to run the '%s' command", strings.ToLower(cmd)))
+			s.logger.Warn("ACL denied", "user", client.aclUser.Username, "cmd", cmd, "client", client.addr)
+			return
+		}
+	}
+
+	// --- Execute with slow-log timing ---
+	start := time.Now()
+	s.executeCommand(w, client, cmd, args)
+	elapsed := time.Since(start)
+
+	// Record slow queries.
+	if s.config.SlowLogThreshold > 0 && elapsed >= s.config.SlowLogThreshold {
+		argStrs := make([]string, len(args))
+		for i, a := range args {
+			argStrs[i] = a.Str
+		}
+		s.addSlowLog(elapsed, client.addr, cmd, argStrs)
+	}
+
+	// --- Audit logging for security-sensitive commands ---
+	switch cmd {
+	case "AUTH", "FLUSHDB", "FLUSHALL", "CONFIG", "ACL", "DEBUG", "SAVE", "BGSAVE", "SHUTDOWN":
+		user := "default"
+		if client.aclUser != nil {
+			user = client.aclUser.Username
+		}
+		s.logger.Info("audit",
+			"cmd", cmd,
+			"user", user,
+			"client", client.addr,
+			"latency_us", elapsed.Microseconds(),
+		)
 	}
 }
 
@@ -427,6 +609,10 @@ func (s *Server) executeCommand(w *protocol.Writer, client *clientConn, cmd stri
 		s.cmdLastSave(w)
 	case "BGSAVE", "SAVE":
 		s.cmdSave(w)
+	case "SLOWLOG":
+		s.cmdSlowLog(w, args)
+	case "ACL":
+		s.cmdACL(w, client, args)
 
 	// Sorted Set commands
 	case "ZADD":
@@ -461,6 +647,110 @@ func (s *Server) executeCommand(w *protocol.Writer, client *clientConn, cmd stri
 		s.cmdZPopMin(w, args)
 	case "ZPOPMAX":
 		s.cmdZPopMax(w, args)
+
+	// Hash commands
+	case "HSET":
+		s.cmdHSet(w, args)
+	case "HGET":
+		s.cmdHGet(w, args)
+	case "HMSET":
+		s.cmdHMSet(w, args)
+	case "HMGET":
+		s.cmdHMGet(w, args)
+	case "HDEL":
+		s.cmdHDel(w, args)
+	case "HEXISTS":
+		s.cmdHExists(w, args)
+	case "HLEN":
+		s.cmdHLen(w, args)
+	case "HGETALL":
+		s.cmdHGetAll(w, args)
+	case "HKEYS":
+		s.cmdHKeys(w, args)
+	case "HVALS":
+		s.cmdHVals(w, args)
+	case "HINCRBY":
+		s.cmdHIncrBy(w, args)
+	case "HINCRBYFLOAT":
+		s.cmdHIncrByFloat(w, args)
+	case "HSETNX":
+		s.cmdHSetNX(w, args)
+
+	// List commands
+	case "LPUSH":
+		s.cmdLPush(w, args)
+	case "RPUSH":
+		s.cmdRPush(w, args)
+	case "LPOP":
+		s.cmdLPop(w, args)
+	case "RPOP":
+		s.cmdRPop(w, args)
+	case "LLEN":
+		s.cmdLLen(w, args)
+	case "LINDEX":
+		s.cmdLIndex(w, args)
+	case "LSET":
+		s.cmdLSet(w, args)
+	case "LRANGE":
+		s.cmdLRange(w, args)
+	case "LINSERT":
+		s.cmdLInsert(w, args)
+	case "LREM":
+		s.cmdLRem(w, args)
+	case "LTRIM":
+		s.cmdLTrim(w, args)
+
+	// Set commands
+	case "SADD":
+		s.cmdSAdd(w, args)
+	case "SREM":
+		s.cmdSRem(w, args)
+	case "SISMEMBER":
+		s.cmdSIsMember(w, args)
+	case "SCARD":
+		s.cmdSCard(w, args)
+	case "SMEMBERS":
+		s.cmdSMembers(w, args)
+	case "SRANDMEMBER":
+		s.cmdSRandMember(w, args)
+	case "SPOP":
+		s.cmdSPop(w, args)
+	case "SINTER":
+		s.cmdSInter(w, args)
+	case "SUNION":
+		s.cmdSUnion(w, args)
+	case "SDIFF":
+		s.cmdSDiff(w, args)
+
+	// Time-Series commands
+	case "TS.ADD":
+		s.cmdTSAdd(w, args)
+	case "TS.GET":
+		s.cmdTSGet(w, args)
+	case "TS.RANGE":
+		s.cmdTSRange(w, args)
+	case "TS.INFO":
+		s.cmdTSInfo(w, args)
+	case "TS.DEL":
+		s.cmdTSDel(w, args)
+	case "TS.KEYS":
+		s.cmdTSKeys(w)
+
+	// Hot key detection
+	case "HOTKEYS":
+		s.cmdHotKeys(w, args)
+
+	// Snapshot commands
+	case "SNAPSHOT":
+		s.cmdSnapshot(w, args)
+
+	// CDC commands
+	case "CDC":
+		s.cmdCDC(w, args)
+
+	// Benchmark
+	case "BENCHMARK":
+		s.cmdBenchmark(w, args)
 
 	default:
 		w.WriteError(fmt.Sprintf("unknown command '%s'", cmd))
@@ -690,13 +980,14 @@ func (s *Server) cmdMSet(w *protocol.Writer, args []protocol.Value) {
 		return
 	}
 
+	pairs := make(map[string][]byte, len(args)/2)
 	for i := 0; i < len(args); i += 2 {
-		key := args[i].Str
-		value := []byte(args[i+1].Str)
-		if err := s.engine.Set(key, value); err != nil {
-			w.WriteError("internal error")
-			return
-		}
+		pairs[args[i].Str] = []byte(args[i+1].Str)
+	}
+
+	if err := s.engine.MSet(pairs); err != nil {
+		w.WriteError("internal error")
+		return
 	}
 
 	w.WriteSimpleString("OK")
@@ -872,14 +1163,23 @@ func (s *Server) cmdKeys(w *protocol.Writer, args []protocol.Value) {
 	pattern := args[0].Str
 	keys := s.engine.Keys()
 
-	// Only support '*' pattern (all keys)
-	if pattern != "*" {
-		// For simplicity, only support * pattern
-		w.WriteStringArray([]string{})
+	if pattern == "*" {
+		w.WriteStringArray(keys)
 		return
 	}
 
-	w.WriteStringArray(keys)
+	// Use filepath.Match for Redis-compatible glob matching
+	var matched []string
+	for _, key := range keys {
+		if ok, _ := filepath.Match(pattern, key); ok {
+			matched = append(matched, key)
+		}
+	}
+	if matched == nil {
+		matched = []string{}
+	}
+
+	w.WriteStringArray(matched)
 }
 
 func (s *Server) cmdExpire(w *protocol.Writer, args []protocol.Value) {
@@ -979,11 +1279,7 @@ func (s *Server) cmdType(w *protocol.Writer, args []protocol.Value) {
 		return
 	}
 
-	if s.engine.Exists(args[0].Str) {
-		w.WriteSimpleString("string")
-	} else {
-		w.WriteSimpleString("none")
-	}
+	w.WriteSimpleString(s.engine.KeyType(args[0].Str))
 }
 
 // Server commands
@@ -1044,23 +1340,197 @@ func (s *Server) cmdCommand(w *protocol.Writer) {
 	w.WriteStringArray([]string{})
 }
 
-// AUTH command
+// AUTH command — supports both legacy single-password and ACL user/password.
+// AUTH <password>         (legacy mode)
+// AUTH <username> <password>  (ACL mode)
 func (s *Server) cmdAuth(w *protocol.Writer, client *clientConn, args []protocol.Value) {
-	if len(args) != 1 {
+	if len(args) < 1 || len(args) > 2 {
 		w.WriteError("wrong number of arguments for 'AUTH' command")
 		return
 	}
 
+	// ACL mode: per-user authentication
+	if len(s.config.Users) > 0 {
+		var username, password string
+		if len(args) == 2 {
+			username = args[0].Str
+			password = args[1].Str
+		} else {
+			username = "default"
+			password = args[0].Str
+		}
+		for i := range s.config.Users {
+			u := &s.config.Users[i]
+			if u.Username == username && u.Enabled {
+				if subtle.ConstantTimeCompare([]byte(u.Password), []byte(password)) == 1 {
+					client.authenticated = true
+					client.aclUser = u
+					w.WriteSimpleString("OK")
+					return
+				}
+			}
+		}
+		w.WriteError("WRONGPASS invalid username-password pair or user is disabled")
+		return
+	}
+
+	// Legacy single-password mode
+	if len(args) != 1 {
+		w.WriteError("wrong number of arguments for 'AUTH' command")
+		return
+	}
 	if s.config.Password == "" {
 		w.WriteError("Client sent AUTH, but no password is set")
 		return
 	}
-
-	if args[0].Str == s.config.Password {
+	if subtle.ConstantTimeCompare([]byte(args[0].Str), []byte(s.config.Password)) == 1 {
 		client.authenticated = true
 		w.WriteSimpleString("OK")
 	} else {
 		w.WriteError("WRONGPASS invalid username-password pair")
+	}
+}
+
+// ---------- ACL helpers ----------
+
+// readOnlyCmds are commands that only read data (no mutation).
+var readOnlyCmds = map[string]bool{
+	"GET": true, "MGET": true, "STRLEN": true, "GETRANGE": true,
+	"EXISTS": true, "KEYS": true, "SCAN": true, "TTL": true, "PTTL": true,
+	"TYPE": true, "RANDOMKEY": true, "DBSIZE": true, "INFO": true,
+	"PING": true, "ECHO": true, "TIME": true, "COMMAND": true,
+	"CLIENT": true, "SELECT": true, "AUTH": true, "QUIT": true,
+	"OBJECT": true, "DUMP": true, "TOUCH": true, "LLEN": true,
+	"LINDEX": true, "LRANGE": true, "SISMEMBER": true, "SCARD": true,
+	"SMEMBERS": true, "SRANDMEMBER": true, "SINTER": true, "SUNION": true,
+	"SDIFF": true, "HGET": true, "HMGET": true, "HEXISTS": true,
+	"HLEN": true, "HGETALL": true, "HKEYS": true, "HVALS": true,
+	"ZSCORE": true, "ZCARD": true, "ZRANK": true, "ZREVRANK": true,
+	"ZRANGE": true, "ZREVRANGE": true, "ZRANGEBYSCORE": true,
+	"ZREVRANGEBYSCORE": true, "ZCOUNT": true, "SUBSCRIBE": true,
+	"PSUBSCRIBE": true, "PUBSUB": true, "SLOWLOG": true,
+}
+
+func (s *Server) aclAllowed(u *ACLUser, cmd string) bool {
+	if u.AllCommands {
+		return true
+	}
+	if u.ReadOnly {
+		return readOnlyCmds[cmd]
+	}
+	for _, allowed := range u.AllowedCmds {
+		if strings.EqualFold(allowed, cmd) {
+			return true
+		}
+	}
+	return false
+}
+
+// cmdACL implements the ACL WHOAMI / ACL LIST commands.
+func (s *Server) cmdACL(w *protocol.Writer, client *clientConn, args []protocol.Value) {
+	if len(args) == 0 {
+		w.WriteError("wrong number of arguments for 'ACL' command")
+		return
+	}
+	sub := strings.ToUpper(args[0].Str)
+	switch sub {
+	case "WHOAMI":
+		if client.aclUser != nil {
+			w.WriteBulkString([]byte(client.aclUser.Username))
+		} else {
+			w.WriteBulkString([]byte("default"))
+		}
+	case "LIST":
+		items := make([]string, 0, len(s.config.Users))
+		for _, u := range s.config.Users {
+			status := "on"
+			if !u.Enabled {
+				status = "off"
+			}
+			perms := "~* +@all"
+			if u.ReadOnly {
+				perms = "~* +@read"
+			} else if !u.AllCommands {
+				perms = "~* +" + strings.Join(u.AllowedCmds, " +")
+			}
+			items = append(items, fmt.Sprintf("user %s %s %s", u.Username, status, perms))
+		}
+		w.WriteStringArray(items)
+	default:
+		w.WriteError(fmt.Sprintf("unknown subcommand '%s' for ACL", sub))
+	}
+}
+
+// ---------- Slow-log ----------
+
+func (s *Server) addSlowLog(dur time.Duration, client, cmd string, args []string) {
+	s.slowLogMu.Lock()
+	defer s.slowLogMu.Unlock()
+	s.slowLogID++
+	entry := slowLogEntry{
+		ID:        s.slowLogID,
+		Timestamp: time.Now(),
+		Duration:  dur,
+		Client:    client,
+		Cmd:       cmd,
+		Args:      args,
+	}
+	s.slowLog = append(s.slowLog, entry)
+	if len(s.slowLog) > s.config.SlowLogMaxLen {
+		s.slowLog = s.slowLog[len(s.slowLog)-s.config.SlowLogMaxLen:]
+	}
+	s.logger.Warn("slow query",
+		"id", entry.ID,
+		"cmd", cmd,
+		"duration_us", dur.Microseconds(),
+		"client", client,
+	)
+}
+
+// cmdSlowLog implements SLOWLOG GET [count] / SLOWLOG LEN / SLOWLOG RESET.
+func (s *Server) cmdSlowLog(w *protocol.Writer, args []protocol.Value) {
+	if len(args) == 0 {
+		w.WriteError("wrong number of arguments for 'SLOWLOG' command")
+		return
+	}
+	sub := strings.ToUpper(args[0].Str)
+	switch sub {
+	case "GET":
+		count := 10
+		if len(args) > 1 {
+			if n, err := strconv.Atoi(args[1].Str); err == nil && n > 0 {
+				count = n
+			}
+		}
+		s.slowLogMu.Lock()
+		entries := s.slowLog
+		if len(entries) > count {
+			entries = entries[len(entries)-count:]
+		}
+		// Build response: array of arrays
+		result := make([]string, 0, len(entries)*4)
+		for i := len(entries) - 1; i >= 0; i-- {
+			e := entries[i]
+			result = append(result,
+				fmt.Sprintf("%d) id=%d, time=%d, duration=%dus, client=%s, cmd=%s %s",
+					len(entries)-i, e.ID, e.Timestamp.Unix(), e.Duration.Microseconds(),
+					e.Client, e.Cmd, strings.Join(e.Args, " ")))
+		}
+		s.slowLogMu.Unlock()
+		w.WriteStringArray(result)
+	case "LEN":
+		s.slowLogMu.Lock()
+		n := len(s.slowLog)
+		s.slowLogMu.Unlock()
+		w.WriteInteger(int64(n))
+	case "RESET":
+		s.slowLogMu.Lock()
+		s.slowLog = s.slowLog[:0]
+		s.slowLogID = 0
+		s.slowLogMu.Unlock()
+		w.WriteSimpleString("OK")
+	default:
+		w.WriteError(fmt.Sprintf("unknown subcommand '%s' for SLOWLOG", sub))
 	}
 }
 
@@ -1163,19 +1633,16 @@ func (s *Server) cmdScan(w *protocol.Writer, args []protocol.Value) {
 		}
 	}
 
-	// Get all keys and filter
+	// Get all keys, sort for stable cursor ordering
 	allKeys := s.engine.Keys()
+	sort.Strings(allKeys)
+
+	// Apply pattern filter using filepath.Match for glob support
 	var matched []string
-
-	// Convert pattern to regex
-	regexPattern := "^" + strings.ReplaceAll(strings.ReplaceAll(pattern, "*", ".*"), "?", ".") + "$"
-	re, err := regexp.Compile(regexPattern)
-	if err != nil {
-		re = regexp.MustCompile(".*") // Match all on invalid pattern
-	}
-
 	for _, key := range allKeys {
-		if re.MatchString(key) {
+		if pattern == "*" {
+			matched = append(matched, key)
+		} else if ok, _ := filepath.Match(pattern, key); ok {
 			matched = append(matched, key)
 		}
 	}
@@ -1330,8 +1797,7 @@ func (s *Server) cmdRandomKey(w *protocol.Writer) {
 		w.WriteNull()
 		return
 	}
-	// Return first key (simple implementation)
-	w.WriteBulkString([]byte(keys[0]))
+	w.WriteBulkString([]byte(keys[rand.Intn(len(keys))]))
 }
 
 // CONFIG command
@@ -1484,7 +1950,11 @@ func (s *Server) cmdExec(w *protocol.Writer, client *clientConn) {
 	client.inMulti = false
 	client.multiQueue = nil
 
-	// Execute all queued commands
+	// Acquire engine-level lock for isolation
+	s.engine.ExecLock()
+	defer s.engine.ExecUnlock()
+
+	// Execute all queued commands under the engine lock
 	results := make([][]byte, len(queue))
 	for i, qc := range queue {
 		// Create a buffer to capture the response
@@ -2106,25 +2576,22 @@ func (s *Server) cmdMSetNX(w *protocol.Writer, args []protocol.Value) {
 		return
 	}
 
-	// Check if any key exists
+	pairs := make(map[string][]byte, len(args)/2)
 	for i := 0; i < len(args); i += 2 {
-		if s.engine.Exists(args[i].Str) {
-			w.WriteInteger(0)
-			return
-		}
+		pairs[args[i].Str] = []byte(args[i+1].Str)
 	}
 
-	// Set all keys
-	for i := 0; i < len(args); i += 2 {
-		key := args[i].Str
-		value := []byte(args[i+1].Str)
-		if err := s.engine.Set(key, value); err != nil {
-			w.WriteError("internal error")
-			return
-		}
+	ok, err := s.engine.MSetNX(pairs)
+	if err != nil {
+		w.WriteError("internal error")
+		return
 	}
 
-	w.WriteInteger(1)
+	if ok {
+		w.WriteInteger(1)
+	} else {
+		w.WriteInteger(0)
+	}
 }
 
 func (s *Server) cmdIncrByFloat(w *protocol.Writer, args []protocol.Value) {
@@ -2140,24 +2607,13 @@ func (s *Server) cmdIncrByFloat(w *protocol.Writer, args []protocol.Value) {
 		return
 	}
 
-	var current float64
-	value, exists := s.engine.Get(key)
-	if exists {
-		current, err = strconv.ParseFloat(string(value), 64)
-		if err != nil {
-			w.WriteError("value is not a valid float")
-			return
-		}
-	}
-
-	newValue := current + increment
-	newStr := strconv.FormatFloat(newValue, 'f', -1, 64)
-
-	if err := s.engine.Set(key, []byte(newStr)); err != nil {
-		w.WriteError("internal error")
+	newValue, err := s.engine.IncrByFloat(key, increment)
+	if err != nil {
+		w.WriteError(err.Error())
 		return
 	}
 
+	newStr := strconv.FormatFloat(newValue, 'f', -1, 64)
 	w.WriteBulkString([]byte(newStr))
 }
 
@@ -2321,7 +2777,12 @@ func (s *Server) cmdZAdd(w *protocol.Writer, args []protocol.Value) {
 		return
 	}
 
-	added := s.engine.ZAdd(key, members...)
+	added, err := s.engine.ZAdd(key, members...)
+	if err != nil {
+		w.WriteError("internal error")
+		log.Printf("server: ZADD error: %v", err)
+		return
+	}
 	w.WriteInteger(int64(added))
 }
 
@@ -2354,7 +2815,12 @@ func (s *Server) cmdZRem(w *protocol.Writer, args []protocol.Value) {
 		members[i-1] = args[i].Str
 	}
 
-	removed := s.engine.ZRem(key, members...)
+	removed, err := s.engine.ZRem(key, members...)
+	if err != nil {
+		w.WriteError("internal error")
+		log.Printf("server: ZREM error: %v", err)
+		return
+	}
 	w.WriteInteger(int64(removed))
 }
 
@@ -2560,7 +3026,12 @@ func (s *Server) cmdZIncrBy(w *protocol.Writer, args []protocol.Value) {
 	}
 	member := args[2].Str
 
-	newScore := s.engine.ZIncrBy(key, member, increment)
+	newScore, err := s.engine.ZIncrBy(key, member, increment)
+	if err != nil {
+		w.WriteError("internal error")
+		log.Printf("server: ZINCRBY error: %v", err)
+		return
+	}
 	w.WriteBulkString([]byte(strconv.FormatFloat(newScore, 'f', -1, 64)))
 }
 
@@ -2582,7 +3053,12 @@ func (s *Server) cmdZRemRangeByRank(w *protocol.Writer, args []protocol.Value) {
 		return
 	}
 
-	removed := s.engine.ZRemRangeByRank(key, start, stop)
+	removed, err := s.engine.ZRemRangeByRank(key, start, stop)
+	if err != nil {
+		w.WriteError("internal error")
+		log.Printf("server: ZREMRANGEBYRANK error: %v", err)
+		return
+	}
 	w.WriteInteger(int64(removed))
 }
 
@@ -2604,7 +3080,12 @@ func (s *Server) cmdZRemRangeByScore(w *protocol.Writer, args []protocol.Value) 
 		return
 	}
 
-	removed := s.engine.ZRemRangeByScore(key, min, max)
+	removed, err := s.engine.ZRemRangeByScore(key, min, max)
+	if err != nil {
+		w.WriteError("internal error")
+		log.Printf("server: ZREMRANGEBYSCORE error: %v", err)
+		return
+	}
 	w.WriteInteger(int64(removed))
 }
 
@@ -2625,7 +3106,12 @@ func (s *Server) cmdZPopMin(w *protocol.Writer, args []protocol.Value) {
 		}
 	}
 
-	members := s.engine.ZPopMin(key, count)
+	members, err := s.engine.ZPopMin(key, count)
+	if err != nil {
+		w.WriteError("internal error")
+		log.Printf("server: ZPOPMIN error: %v", err)
+		return
+	}
 	s.writeZRangeResult(w, members, true)
 }
 
@@ -2646,7 +3132,12 @@ func (s *Server) cmdZPopMax(w *protocol.Writer, args []protocol.Value) {
 		}
 	}
 
-	members := s.engine.ZPopMax(key, count)
+	members, err := s.engine.ZPopMax(key, count)
+	if err != nil {
+		w.WriteError("internal error")
+		log.Printf("server: ZPOPMAX error: %v", err)
+		return
+	}
 	s.writeZRangeResult(w, members, true)
 }
 
@@ -2681,4 +3172,883 @@ func parseZSetScore(s string) (float64, error) {
 	default:
 		return strconv.ParseFloat(s, 64)
 	}
+}
+
+// ─── Hash commands ──────────────────────────────────────────────────────────
+
+func (s *Server) cmdHSet(w *protocol.Writer, args []protocol.Value) {
+	if len(args) < 3 || len(args)%2 == 0 {
+		w.WriteError("wrong number of arguments for 'HSET' command")
+		return
+	}
+	key := args[0].Str
+	fields := make([]store.HashFieldValue, 0, (len(args)-1)/2)
+	for i := 1; i < len(args); i += 2 {
+		fields = append(fields, store.HashFieldValue{Field: args[i].Str, Value: []byte(args[i+1].Str)})
+	}
+	n, err := s.engine.HSet(key, fields...)
+	if err != nil {
+		w.WriteError("internal error")
+		return
+	}
+	w.WriteInteger(int64(n))
+}
+
+func (s *Server) cmdHGet(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 2 {
+		w.WriteError("wrong number of arguments for 'HGET' command")
+		return
+	}
+	val, ok := s.engine.HGet(args[0].Str, args[1].Str)
+	if !ok {
+		w.WriteNull()
+		return
+	}
+	w.WriteBulkString(val)
+}
+
+func (s *Server) cmdHMSet(w *protocol.Writer, args []protocol.Value) {
+	if len(args) < 3 || len(args)%2 == 0 {
+		w.WriteError("wrong number of arguments for 'HMSET' command")
+		return
+	}
+	key := args[0].Str
+	fields := make([]store.HashFieldValue, 0, (len(args)-1)/2)
+	for i := 1; i < len(args); i += 2 {
+		fields = append(fields, store.HashFieldValue{Field: args[i].Str, Value: []byte(args[i+1].Str)})
+	}
+	if _, err := s.engine.HSet(key, fields...); err != nil {
+		w.WriteError("internal error")
+		return
+	}
+	w.WriteSimpleString("OK")
+}
+
+func (s *Server) cmdHMGet(w *protocol.Writer, args []protocol.Value) {
+	if len(args) < 2 {
+		w.WriteError("wrong number of arguments for 'HMGET' command")
+		return
+	}
+	key := args[0].Str
+	results := make([][]byte, len(args)-1)
+	nulls := make([]bool, len(args)-1)
+	for i := 1; i < len(args); i++ {
+		val, ok := s.engine.HGet(key, args[i].Str)
+		if ok {
+			results[i-1] = val
+		} else {
+			nulls[i-1] = true
+		}
+	}
+	w.WriteArrayWithNulls(results, nulls)
+}
+
+func (s *Server) cmdHDel(w *protocol.Writer, args []protocol.Value) {
+	if len(args) < 2 {
+		w.WriteError("wrong number of arguments for 'HDEL' command")
+		return
+	}
+	key := args[0].Str
+	fields := make([]string, len(args)-1)
+	for i := 1; i < len(args); i++ {
+		fields[i-1] = args[i].Str
+	}
+	n, err := s.engine.HDel(key, fields...)
+	if err != nil {
+		w.WriteError("internal error")
+		return
+	}
+	w.WriteInteger(int64(n))
+}
+
+func (s *Server) cmdHExists(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 2 {
+		w.WriteError("wrong number of arguments for 'HEXISTS' command")
+		return
+	}
+	if s.engine.HExists(args[0].Str, args[1].Str) {
+		w.WriteInteger(1)
+	} else {
+		w.WriteInteger(0)
+	}
+}
+
+func (s *Server) cmdHLen(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 1 {
+		w.WriteError("wrong number of arguments for 'HLEN' command")
+		return
+	}
+	w.WriteInteger(int64(s.engine.HLen(args[0].Str)))
+}
+
+func (s *Server) cmdHGetAll(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 1 {
+		w.WriteError("wrong number of arguments for 'HGETALL' command")
+		return
+	}
+	pairs := s.engine.HGetAll(args[0].Str)
+	w.WriteArrayHeader(len(pairs) * 2)
+	for _, p := range pairs {
+		w.WriteBulkString([]byte(p.Field))
+		w.WriteBulkString(p.Value)
+	}
+}
+
+func (s *Server) cmdHKeys(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 1 {
+		w.WriteError("wrong number of arguments for 'HKEYS' command")
+		return
+	}
+	w.WriteStringArray(s.engine.HKeys(args[0].Str))
+}
+
+func (s *Server) cmdHVals(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 1 {
+		w.WriteError("wrong number of arguments for 'HVALS' command")
+		return
+	}
+	w.WriteArray(s.engine.HVals(args[0].Str))
+}
+
+func (s *Server) cmdHIncrBy(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 3 {
+		w.WriteError("wrong number of arguments for 'HINCRBY' command")
+		return
+	}
+	delta, err := strconv.ParseInt(args[2].Str, 10, 64)
+	if err != nil {
+		w.WriteError("value is not an integer or out of range")
+		return
+	}
+	result, err := s.engine.HIncrBy(args[0].Str, args[1].Str, delta)
+	if err != nil {
+		w.WriteError(err.Error())
+		return
+	}
+	w.WriteInteger(result)
+}
+
+func (s *Server) cmdHIncrByFloat(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 3 {
+		w.WriteError("wrong number of arguments for 'HINCRBYFLOAT' command")
+		return
+	}
+	delta, err := strconv.ParseFloat(args[2].Str, 64)
+	if err != nil {
+		w.WriteError("value is not a valid float")
+		return
+	}
+	result, err := s.engine.HIncrByFloat(args[0].Str, args[1].Str, delta)
+	if err != nil {
+		w.WriteError(err.Error())
+		return
+	}
+	w.WriteBulkString([]byte(strconv.FormatFloat(result, 'f', -1, 64)))
+}
+
+func (s *Server) cmdHSetNX(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 3 {
+		w.WriteError("wrong number of arguments for 'HSETNX' command")
+		return
+	}
+	ok, err := s.engine.HSetNX(args[0].Str, args[1].Str, []byte(args[2].Str))
+	if err != nil {
+		w.WriteError("internal error")
+		return
+	}
+	if ok {
+		w.WriteInteger(1)
+	} else {
+		w.WriteInteger(0)
+	}
+}
+
+// ─── List commands ──────────────────────────────────────────────────────────
+
+func (s *Server) cmdLPush(w *protocol.Writer, args []protocol.Value) {
+	if len(args) < 2 {
+		w.WriteError("wrong number of arguments for 'LPUSH' command")
+		return
+	}
+	key := args[0].Str
+	values := make([][]byte, len(args)-1)
+	for i := 1; i < len(args); i++ {
+		values[i-1] = []byte(args[i].Str)
+	}
+	n, err := s.engine.LPush(key, values...)
+	if err != nil {
+		w.WriteError("internal error")
+		return
+	}
+	w.WriteInteger(int64(n))
+}
+
+func (s *Server) cmdRPush(w *protocol.Writer, args []protocol.Value) {
+	if len(args) < 2 {
+		w.WriteError("wrong number of arguments for 'RPUSH' command")
+		return
+	}
+	key := args[0].Str
+	values := make([][]byte, len(args)-1)
+	for i := 1; i < len(args); i++ {
+		values[i-1] = []byte(args[i].Str)
+	}
+	n, err := s.engine.RPush(key, values...)
+	if err != nil {
+		w.WriteError("internal error")
+		return
+	}
+	w.WriteInteger(int64(n))
+}
+
+func (s *Server) cmdLPop(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 1 {
+		w.WriteError("wrong number of arguments for 'LPOP' command")
+		return
+	}
+	val, ok, err := s.engine.LPop(args[0].Str)
+	if err != nil {
+		w.WriteError("internal error")
+		return
+	}
+	if !ok {
+		w.WriteNull()
+		return
+	}
+	w.WriteBulkString(val)
+}
+
+func (s *Server) cmdRPop(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 1 {
+		w.WriteError("wrong number of arguments for 'RPOP' command")
+		return
+	}
+	val, ok, err := s.engine.RPop(args[0].Str)
+	if err != nil {
+		w.WriteError("internal error")
+		return
+	}
+	if !ok {
+		w.WriteNull()
+		return
+	}
+	w.WriteBulkString(val)
+}
+
+func (s *Server) cmdLLen(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 1 {
+		w.WriteError("wrong number of arguments for 'LLEN' command")
+		return
+	}
+	w.WriteInteger(int64(s.engine.LLen(args[0].Str)))
+}
+
+func (s *Server) cmdLIndex(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 2 {
+		w.WriteError("wrong number of arguments for 'LINDEX' command")
+		return
+	}
+	index, err := strconv.Atoi(args[1].Str)
+	if err != nil {
+		w.WriteError("value is not an integer or out of range")
+		return
+	}
+	val, ok := s.engine.LIndex(args[0].Str, index)
+	if !ok {
+		w.WriteNull()
+		return
+	}
+	w.WriteBulkString(val)
+}
+
+func (s *Server) cmdLSet(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 3 {
+		w.WriteError("wrong number of arguments for 'LSET' command")
+		return
+	}
+	index, err := strconv.Atoi(args[1].Str)
+	if err != nil {
+		w.WriteError("value is not an integer or out of range")
+		return
+	}
+	if err := s.engine.LSet(args[0].Str, index, []byte(args[2].Str)); err != nil {
+		w.WriteError(err.Error())
+		return
+	}
+	w.WriteSimpleString("OK")
+}
+
+func (s *Server) cmdLRange(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 3 {
+		w.WriteError("wrong number of arguments for 'LRANGE' command")
+		return
+	}
+	start, err := strconv.Atoi(args[1].Str)
+	if err != nil {
+		w.WriteError("value is not an integer or out of range")
+		return
+	}
+	stop, err := strconv.Atoi(args[2].Str)
+	if err != nil {
+		w.WriteError("value is not an integer or out of range")
+		return
+	}
+	items := s.engine.LRange(args[0].Str, start, stop)
+	w.WriteArray(items)
+}
+
+func (s *Server) cmdLInsert(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 4 {
+		w.WriteError("wrong number of arguments for 'LINSERT' command")
+		return
+	}
+	pos := strings.ToUpper(args[1].Str)
+	var before bool
+	switch pos {
+	case "BEFORE":
+		before = true
+	case "AFTER":
+		before = false
+	default:
+		w.WriteError("syntax error")
+		return
+	}
+	n, err := s.engine.LInsert(args[0].Str, before, []byte(args[2].Str), []byte(args[3].Str))
+	if err != nil {
+		w.WriteError(err.Error())
+		return
+	}
+	w.WriteInteger(int64(n))
+}
+
+func (s *Server) cmdLRem(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 3 {
+		w.WriteError("wrong number of arguments for 'LREM' command")
+		return
+	}
+	count, err := strconv.Atoi(args[1].Str)
+	if err != nil {
+		w.WriteError("value is not an integer or out of range")
+		return
+	}
+	n, err := s.engine.LRem(args[0].Str, count, []byte(args[2].Str))
+	if err != nil {
+		w.WriteError(err.Error())
+		return
+	}
+	w.WriteInteger(int64(n))
+}
+
+func (s *Server) cmdLTrim(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 3 {
+		w.WriteError("wrong number of arguments for 'LTRIM' command")
+		return
+	}
+	start, err := strconv.Atoi(args[1].Str)
+	if err != nil {
+		w.WriteError("value is not an integer or out of range")
+		return
+	}
+	stop, err := strconv.Atoi(args[2].Str)
+	if err != nil {
+		w.WriteError("value is not an integer or out of range")
+		return
+	}
+	if err := s.engine.LTrim(args[0].Str, start, stop); err != nil {
+		w.WriteError(err.Error())
+		return
+	}
+	w.WriteSimpleString("OK")
+}
+
+// ─── Set commands ───────────────────────────────────────────────────────────
+
+func (s *Server) cmdSAdd(w *protocol.Writer, args []protocol.Value) {
+	if len(args) < 2 {
+		w.WriteError("wrong number of arguments for 'SADD' command")
+		return
+	}
+	key := args[0].Str
+	members := make([]string, len(args)-1)
+	for i := 1; i < len(args); i++ {
+		members[i-1] = args[i].Str
+	}
+	n, err := s.engine.SAdd(key, members...)
+	if err != nil {
+		w.WriteError("internal error")
+		return
+	}
+	w.WriteInteger(int64(n))
+}
+
+func (s *Server) cmdSRem(w *protocol.Writer, args []protocol.Value) {
+	if len(args) < 2 {
+		w.WriteError("wrong number of arguments for 'SREM' command")
+		return
+	}
+	key := args[0].Str
+	members := make([]string, len(args)-1)
+	for i := 1; i < len(args); i++ {
+		members[i-1] = args[i].Str
+	}
+	n, err := s.engine.SRem(key, members...)
+	if err != nil {
+		w.WriteError("internal error")
+		return
+	}
+	w.WriteInteger(int64(n))
+}
+
+func (s *Server) cmdSIsMember(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 2 {
+		w.WriteError("wrong number of arguments for 'SISMEMBER' command")
+		return
+	}
+	if s.engine.SIsMember(args[0].Str, args[1].Str) {
+		w.WriteInteger(1)
+	} else {
+		w.WriteInteger(0)
+	}
+}
+
+func (s *Server) cmdSCard(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 1 {
+		w.WriteError("wrong number of arguments for 'SCARD' command")
+		return
+	}
+	w.WriteInteger(int64(s.engine.SCard(args[0].Str)))
+}
+
+func (s *Server) cmdSMembers(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 1 {
+		w.WriteError("wrong number of arguments for 'SMEMBERS' command")
+		return
+	}
+	w.WriteStringArray(s.engine.SMembers(args[0].Str))
+}
+
+func (s *Server) cmdSRandMember(w *protocol.Writer, args []protocol.Value) {
+	if len(args) < 1 || len(args) > 2 {
+		w.WriteError("wrong number of arguments for 'SRANDMEMBER' command")
+		return
+	}
+	count := 1
+	if len(args) == 2 {
+		var err error
+		count, err = strconv.Atoi(args[1].Str)
+		if err != nil {
+			w.WriteError("value is not an integer or out of range")
+			return
+		}
+	}
+	members := s.engine.SRandMember(args[0].Str, count)
+	if len(args) == 1 {
+		// Single element mode: return bulk string or nil
+		if len(members) == 0 {
+			w.WriteNull()
+		} else {
+			w.WriteBulkString([]byte(members[0]))
+		}
+	} else {
+		w.WriteStringArray(members)
+	}
+}
+
+func (s *Server) cmdSPop(w *protocol.Writer, args []protocol.Value) {
+	if len(args) < 1 || len(args) > 2 {
+		w.WriteError("wrong number of arguments for 'SPOP' command")
+		return
+	}
+	count := 1
+	if len(args) == 2 {
+		var err error
+		count, err = strconv.Atoi(args[1].Str)
+		if err != nil {
+			w.WriteError("value is not an integer or out of range")
+			return
+		}
+		if count < 0 {
+			w.WriteError("value is not an integer or out of range")
+			return
+		}
+	}
+	members, err := s.engine.SPop(args[0].Str, count)
+	if err != nil {
+		w.WriteError("internal error")
+		return
+	}
+	if len(args) == 1 {
+		// Single element mode: return bulk string or nil
+		if len(members) == 0 {
+			w.WriteNull()
+		} else {
+			w.WriteBulkString([]byte(members[0]))
+		}
+	} else {
+		w.WriteStringArray(members)
+	}
+}
+
+func (s *Server) cmdSInter(w *protocol.Writer, args []protocol.Value) {
+	if len(args) < 1 {
+		w.WriteError("wrong number of arguments for 'SINTER' command")
+		return
+	}
+	keys := make([]string, len(args))
+	for i, a := range args {
+		keys[i] = a.Str
+	}
+	w.WriteStringArray(s.engine.SInter(keys...))
+}
+
+func (s *Server) cmdSUnion(w *protocol.Writer, args []protocol.Value) {
+	if len(args) < 1 {
+		w.WriteError("wrong number of arguments for 'SUNION' command")
+		return
+	}
+	keys := make([]string, len(args))
+	for i, a := range args {
+		keys[i] = a.Str
+	}
+	w.WriteStringArray(s.engine.SUnion(keys...))
+}
+
+func (s *Server) cmdSDiff(w *protocol.Writer, args []protocol.Value) {
+	if len(args) < 1 {
+		w.WriteError("wrong number of arguments for 'SDIFF' command")
+		return
+	}
+	keys := make([]string, len(args))
+	for i, a := range args {
+		keys[i] = a.Str
+	}
+	w.WriteStringArray(s.engine.SDiff(keys...))
+}
+
+// ========================
+// Phase 6: Time-Series Commands
+// ========================
+
+func (s *Server) cmdTSAdd(w *protocol.Writer, args []protocol.Value) {
+	// TS.ADD key timestamp value [RETENTION ms]
+	if len(args) < 3 {
+		w.WriteError("wrong number of arguments for 'TS.ADD' command")
+		return
+	}
+	key := args[0].Str
+
+	var ts int64
+	if args[1].Str == "*" {
+		ts = 0 // auto-timestamp
+	} else {
+		var err error
+		ts, err = strconv.ParseInt(args[1].Str, 10, 64)
+		if err != nil {
+			w.WriteError("ERR invalid timestamp")
+			return
+		}
+	}
+
+	val, err := strconv.ParseFloat(args[2].Str, 64)
+	if err != nil {
+		w.WriteError("ERR invalid value (must be float)")
+		return
+	}
+
+	var retention time.Duration
+	for i := 3; i < len(args)-1; i++ {
+		if strings.ToUpper(args[i].Str) == "RETENTION" {
+			ms, err := strconv.ParseInt(args[i+1].Str, 10, 64)
+			if err != nil {
+				w.WriteError("ERR invalid retention value")
+				return
+			}
+			retention = time.Duration(ms) * time.Millisecond
+		}
+	}
+
+	inserted, err := s.engine.TSAdd(key, ts, val, retention)
+	if err != nil {
+		w.WriteError(err.Error())
+		return
+	}
+	w.WriteInteger(inserted)
+}
+
+func (s *Server) cmdTSGet(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 1 {
+		w.WriteError("wrong number of arguments for 'TS.GET' command")
+		return
+	}
+	dp, ok := s.engine.TSGet(args[0].Str)
+	if !ok {
+		w.WriteNull()
+		return
+	}
+	w.WriteArrayHeader(2)
+	w.WriteInteger(dp.Timestamp)
+	w.WriteBulkString([]byte(strconv.FormatFloat(dp.Value, 'f', -1, 64)))
+}
+
+func (s *Server) cmdTSRange(w *protocol.Writer, args []protocol.Value) {
+	// TS.RANGE key fromTS toTS
+	if len(args) != 3 {
+		w.WriteError("wrong number of arguments for 'TS.RANGE' command")
+		return
+	}
+	fromTS, err := strconv.ParseInt(args[1].Str, 10, 64)
+	if err != nil {
+		w.WriteError("ERR invalid from timestamp")
+		return
+	}
+	toTS, err := strconv.ParseInt(args[2].Str, 10, 64)
+	if err != nil {
+		w.WriteError("ERR invalid to timestamp")
+		return
+	}
+
+	points, err := s.engine.TSRange(args[0].Str, fromTS, toTS)
+	if err != nil {
+		w.WriteError(err.Error())
+		return
+	}
+
+	w.WriteArrayHeader(len(points))
+	for _, p := range points {
+		w.WriteArrayHeader(2)
+		w.WriteInteger(p.Timestamp)
+		w.WriteBulkString([]byte(strconv.FormatFloat(p.Value, 'f', -1, 64)))
+	}
+}
+
+func (s *Server) cmdTSInfo(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 1 {
+		w.WriteError("wrong number of arguments for 'TS.INFO' command")
+		return
+	}
+	info, err := s.engine.TSInfo(args[0].Str)
+	if err != nil {
+		w.WriteError(err.Error())
+		return
+	}
+	w.WriteArrayHeader(10)
+	w.WriteBulkString([]byte("totalSamples"))
+	w.WriteInteger(int64(info.TotalSamples))
+	w.WriteBulkString([]byte("firstTimestamp"))
+	w.WriteInteger(info.FirstTS)
+	w.WriteBulkString([]byte("lastTimestamp"))
+	w.WriteInteger(info.LastTS)
+	w.WriteBulkString([]byte("retentionMs"))
+	w.WriteInteger(info.Retention.Milliseconds())
+	w.WriteBulkString([]byte("memoryBytes"))
+	w.WriteInteger(int64(info.MemoryBytes))
+}
+
+func (s *Server) cmdTSDel(w *protocol.Writer, args []protocol.Value) {
+	if len(args) != 1 {
+		w.WriteError("wrong number of arguments for 'TS.DEL' command")
+		return
+	}
+	ok, err := s.engine.TSDel(args[0].Str)
+	if err != nil {
+		w.WriteError(err.Error())
+		return
+	}
+	if ok {
+		w.WriteInteger(1)
+	} else {
+		w.WriteInteger(0)
+	}
+}
+
+func (s *Server) cmdTSKeys(w *protocol.Writer) {
+	w.WriteStringArray(s.engine.TSKeys())
+}
+
+// ========================
+// Phase 6: Hot Key Detection
+// ========================
+
+func (s *Server) cmdHotKeys(w *protocol.Writer, args []protocol.Value) {
+	n := 10
+	if len(args) >= 1 {
+		var err error
+		n, err = strconv.Atoi(args[0].Str)
+		if err != nil || n <= 0 {
+			w.WriteError("ERR invalid count")
+			return
+		}
+	}
+	entries := s.engine.HotKeys(n)
+	w.WriteArrayHeader(len(entries) * 2)
+	for _, e := range entries {
+		w.WriteBulkString([]byte(e.Key))
+		w.WriteInteger(e.Count)
+	}
+}
+
+// ========================
+// Phase 6: Snapshot Commands
+// ========================
+
+func (s *Server) cmdSnapshot(w *protocol.Writer, args []protocol.Value) {
+	if len(args) < 1 {
+		w.WriteError("wrong number of arguments for 'SNAPSHOT' command")
+		return
+	}
+	sub := strings.ToUpper(args[0].Str)
+	switch sub {
+	case "CREATE":
+		id := ""
+		if len(args) >= 2 {
+			id = args[1].Str
+		}
+		meta, err := s.engine.SnapshotCreate(id)
+		if err != nil {
+			w.WriteError(err.Error())
+			return
+		}
+		w.WriteArrayHeader(4)
+		w.WriteBulkString([]byte("id"))
+		w.WriteBulkString([]byte(meta.ID))
+	case "LIST":
+		metas, err := s.engine.SnapshotList()
+		if err != nil {
+			w.WriteError(err.Error())
+			return
+		}
+		w.WriteArrayHeader(len(metas))
+		for _, m := range metas {
+			w.WriteArrayHeader(6)
+			w.WriteBulkString([]byte("id"))
+			w.WriteBulkString([]byte(m.ID))
+			w.WriteBulkString([]byte("size"))
+			w.WriteInteger(m.SizeBytes)
+		}
+	case "RESTORE":
+		if len(args) < 2 {
+			w.WriteError("ERR SNAPSHOT RESTORE requires an id")
+			return
+		}
+		if err := s.engine.SnapshotRestore(args[1].Str); err != nil {
+			w.WriteError(err.Error())
+			return
+		}
+		w.WriteSimpleString("OK")
+	case "DELETE":
+		if len(args) < 2 {
+			w.WriteError("ERR SNAPSHOT DELETE requires an id")
+			return
+		}
+		if err := s.engine.SnapshotDelete(args[1].Str); err != nil {
+			w.WriteError(err.Error())
+			return
+		}
+		w.WriteSimpleString("OK")
+	default:
+		w.WriteError(fmt.Sprintf("ERR unknown SNAPSHOT subcommand '%s'", sub))
+	}
+}
+
+// ========================
+// Phase 6: CDC Commands
+// ========================
+
+func (s *Server) cmdCDC(w *protocol.Writer, args []protocol.Value) {
+	if len(args) < 1 {
+		w.WriteError("wrong number of arguments for 'CDC' command")
+		return
+	}
+	sub := strings.ToUpper(args[0].Str)
+	switch sub {
+	case "LATEST":
+		n := 50
+		if len(args) >= 2 {
+			var err error
+			n, err = strconv.Atoi(args[1].Str)
+			if err != nil || n <= 0 {
+				w.WriteError("ERR invalid count")
+				return
+			}
+		}
+		events := s.engine.CDCLatest(n)
+		w.WriteArrayHeader(len(events))
+		for _, ev := range events {
+			w.WriteArrayHeader(8)
+			w.WriteBulkString([]byte("id"))
+			w.WriteInteger(int64(ev.ID))
+			w.WriteBulkString([]byte("op"))
+			w.WriteBulkString([]byte(string(ev.Op)))
+			w.WriteBulkString([]byte("key"))
+			w.WriteBulkString([]byte(ev.Key))
+		}
+	case "SINCE":
+		if len(args) < 2 {
+			w.WriteError("ERR CDC SINCE requires an after-id")
+			return
+		}
+		afterID, err := strconv.ParseUint(args[1].Str, 10, 64)
+		if err != nil {
+			w.WriteError("ERR invalid id")
+			return
+		}
+		events := s.engine.CDCSince(afterID)
+		w.WriteArrayHeader(len(events))
+		for _, ev := range events {
+			w.WriteArrayHeader(8)
+			w.WriteBulkString([]byte("id"))
+			w.WriteInteger(int64(ev.ID))
+			w.WriteBulkString([]byte("op"))
+			w.WriteBulkString([]byte(string(ev.Op)))
+			w.WriteBulkString([]byte("key"))
+			w.WriteBulkString([]byte(ev.Key))
+		}
+	case "STATS":
+		stats := s.engine.CDCStats()
+		w.WriteArrayHeader(8)
+		w.WriteBulkString([]byte("total_events"))
+		w.WriteInteger(int64(stats.TotalEvents))
+		w.WriteBulkString([]byte("buffer_size"))
+		w.WriteInteger(int64(stats.BufferSize))
+		w.WriteBulkString([]byte("buffer_cap"))
+		w.WriteInteger(int64(stats.BufferCap))
+		w.WriteBulkString([]byte("subscribers"))
+		w.WriteInteger(int64(stats.Subscribers))
+	default:
+		w.WriteError(fmt.Sprintf("ERR unknown CDC subcommand '%s'", sub))
+	}
+}
+
+// ========================
+// Phase 6: Built-in Benchmark
+// ========================
+
+func (s *Server) cmdBenchmark(w *protocol.Writer, args []protocol.Value) {
+	n := 1000
+	if len(args) >= 1 {
+		var err error
+		n, err = strconv.Atoi(args[0].Str)
+		if err != nil || n <= 0 {
+			w.WriteError("ERR invalid operation count")
+			return
+		}
+	}
+	result := s.engine.RunBenchmark(n)
+	w.WriteArrayHeader(16)
+	w.WriteBulkString([]byte("operations"))
+	w.WriteInteger(int64(result.Operations))
+	w.WriteBulkString([]byte("duration_ms"))
+	w.WriteInteger(result.Duration / 1e6)
+	w.WriteBulkString([]byte("ops_per_sec"))
+	w.WriteBulkString([]byte(strconv.FormatFloat(result.OpsPerSec, 'f', 0, 64)))
+	w.WriteBulkString([]byte("avg_latency_ns"))
+	w.WriteInteger(result.AvgLatencyNs)
+	w.WriteBulkString([]byte("set_ops_per_sec"))
+	w.WriteBulkString([]byte(strconv.FormatFloat(result.SetOpsPerSec, 'f', 0, 64)))
+	w.WriteBulkString([]byte("get_ops_per_sec"))
+	w.WriteBulkString([]byte(strconv.FormatFloat(result.GetOpsPerSec, 'f', 0, 64)))
+	w.WriteBulkString([]byte("p99_latency_ns"))
+	w.WriteInteger(result.P99LatencyNs)
+	w.WriteBulkString([]byte("concurrency"))
+	w.WriteInteger(int64(result.Concurrency))
 }

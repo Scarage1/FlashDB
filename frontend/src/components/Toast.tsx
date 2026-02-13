@@ -1,31 +1,41 @@
 'use client';
 
 import { useToast } from '@/context/ToastContext';
-import { CheckCircle, XCircle, Info } from 'lucide-react';
+import { CheckCircle, XCircle, Info, X } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 
 export default function Toast() {
-  const { message, type, show } = useToast();
+  const { message, type, show, hideToast } = useToast();
 
-  const icons = {
-    success: <CheckCircle className="w-5 h-5 text-green-500" />,
-    error: <XCircle className="w-5 h-5 text-red-500" />,
-    info: <Info className="w-5 h-5 text-blue-500" />,
+  const config = {
+    success: { icon: <CheckCircle size={16} />, color: 'var(--success)', bg: 'var(--success-muted)' },
+    error:   { icon: <XCircle size={16} />, color: 'var(--error)', bg: 'var(--error-muted)' },
+    info:    { icon: <Info size={16} />, color: 'var(--info)', bg: 'var(--info-muted)' },
   };
 
-  const borderColors = {
-    success: 'border-green-500',
-    error: 'border-red-500',
-    info: 'border-blue-500',
-  };
+  const c = config[type];
 
   return (
-    <div
-      className={`fixed bottom-8 right-8 flex items-center gap-3 px-5 py-4 bg-white border ${borderColors[type]} rounded-2xl shadow-2xl z-50 transition-all duration-300 ${
-        show ? 'translate-y-0 opacity-100' : 'translate-y-20 opacity-0 pointer-events-none'
-      }`}
-    >
-      {icons[type]}
-      <span className="font-medium">{message}</span>
-    </div>
+    <AnimatePresence>
+      {show && (
+        <motion.div
+          initial={{ y: 24, opacity: 0, scale: 0.95 }}
+          animate={{ y: 0, opacity: 1, scale: 1 }}
+          exit={{ y: 24, opacity: 0, scale: 0.95 }}
+          transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+          className="fixed bottom-6 right-6 flex items-center gap-3 px-4 py-3 rounded-xl z-50 max-w-sm"
+          style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)', boxShadow: 'var(--shadow-lg)' }}>
+          <span className="flex-shrink-0 w-7 h-7 rounded-lg flex items-center justify-center"
+            style={{ background: c.bg, color: c.color }}>
+            {c.icon}
+          </span>
+          <span className="text-sm font-medium flex-1" style={{ color: 'var(--text-primary)' }}>{message}</span>
+          <button onClick={hideToast} className="flex-shrink-0 p-1 rounded-md hover:bg-[var(--bg-tertiary)] transition-colors"
+            style={{ color: 'var(--text-tertiary)' }}>
+            <X size={14} />
+          </button>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }

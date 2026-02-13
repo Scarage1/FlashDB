@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"sync"
 )
 
 var (
@@ -37,16 +38,40 @@ const (
 const (
 	maxBulkStringLength = 512 * 1024 * 1024 // 512 MiB
 	maxArrayLength      = 1_000_000
+	defaultBufSize      = 64 * 1024 // 64 KiB read/write buffers
 )
+
+// Shared byte slices to avoid allocations on every write.
+var (
+	crlfBytes = []byte("\r\n")
+	nullBytes = []byte("$-1\r\n")
+	errPrefix = []byte("-ERR ")
+	okBytes   = []byte("+OK\r\n")
+)
+
+// intBufPool provides scratch buffers for integer formatting.
+var intBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 0, 20) // max int64 is 19 digits + sign
+		return &b
+	},
+}
 
 // Reader wraps a bufio.Reader for RESP parsing
 type Reader struct {
 	rd *bufio.Reader
 }
 
-// NewReader creates a new RESP Reader
+// NewReader creates a new RESP Reader with an optimised buffer.
 func NewReader(r io.Reader) *Reader {
-	return &Reader{rd: bufio.NewReader(r)}
+	return &Reader{rd: bufio.NewReaderSize(r, defaultBufSize)}
+}
+
+// Buffered returns the number of bytes that can be read from the
+// underlying buffer without issuing a syscall. This is used by the
+// server to detect pipelined commands.
+func (r *Reader) Buffered() int {
+	return r.rd.Buffered()
 }
 
 // ReadValue reads a single RESP value from the reader
@@ -182,126 +207,179 @@ func (r *Reader) readArray() (Value, error) {
 	return Value{Type: TypeArray, Array: array}, nil
 }
 
-// Writer wraps a bufio.Writer for RESP encoding
+// Writer wraps a bufio.Writer for RESP encoding.
+// By default every Write* call flushes immediately (autoFlush=true).
+// Call SetAutoFlush(false) before a pipeline batch, then Flush()
+// once at the end, to amortise syscalls across many responses.
 type Writer struct {
-	wr *bufio.Writer
+	wr        *bufio.Writer
+	autoFlush bool
 }
 
-// NewWriter creates a new RESP Writer
+// NewWriter creates a new RESP Writer with an optimised buffer.
 func NewWriter(w io.Writer) *Writer {
-	return &Writer{wr: bufio.NewWriter(w)}
+	return &Writer{wr: bufio.NewWriterSize(w, defaultBufSize), autoFlush: true}
 }
 
-// WriteSimpleString writes a simple string response
-func (w *Writer) WriteSimpleString(s string) error {
-	_, err := fmt.Fprintf(w.wr, "+%s\r\n", s)
+// SetAutoFlush controls whether each Write* call flushes automatically.
+// Disable it for pipeline batches and call Flush() explicitly.
+func (w *Writer) SetAutoFlush(on bool) { w.autoFlush = on }
+
+// Flush writes any buffered data to the underlying io.Writer.
+func (w *Writer) Flush() error { return w.wr.Flush() }
+
+// flush conditionally flushes based on autoFlush setting.
+func (w *Writer) flush() error {
+	if w.autoFlush {
+		return w.wr.Flush()
+	}
+	return nil
+}
+
+// appendInt appends the integer n (with a preceding type byte) to the
+// bufio.Writer using strconv.AppendInt instead of fmt.Fprintf.
+func (w *Writer) writeTypedInt(prefix byte, n int64) error {
+	if err := w.wr.WriteByte(prefix); err != nil {
+		return err
+	}
+	bp := intBufPool.Get().(*[]byte)
+	b := strconv.AppendInt((*bp)[:0], n, 10)
+	_, err := w.wr.Write(b)
+	*bp = b
+	intBufPool.Put(bp)
 	if err != nil {
 		return err
 	}
-	return w.wr.Flush()
+	_, err = w.wr.Write(crlfBytes)
+	return err
+}
+
+// WriteSimpleString writes a simple string response (+OK\r\n fast-path).
+func (w *Writer) WriteSimpleString(s string) error {
+	if s == "OK" {
+		_, err := w.wr.Write(okBytes)
+		if err != nil {
+			return err
+		}
+		return w.flush()
+	}
+	if err := w.wr.WriteByte('+'); err != nil {
+		return err
+	}
+	if _, err := w.wr.WriteString(s); err != nil {
+		return err
+	}
+	if _, err := w.wr.Write(crlfBytes); err != nil {
+		return err
+	}
+	return w.flush()
 }
 
 // WriteError writes an error response
 func (w *Writer) WriteError(msg string) error {
-	_, err := fmt.Fprintf(w.wr, "-ERR %s\r\n", msg)
-	if err != nil {
+	if _, err := w.wr.Write(errPrefix); err != nil {
 		return err
 	}
-	return w.wr.Flush()
+	if _, err := w.wr.WriteString(msg); err != nil {
+		return err
+	}
+	if _, err := w.wr.Write(crlfBytes); err != nil {
+		return err
+	}
+	return w.flush()
 }
 
 // WriteInteger writes an integer response
 func (w *Writer) WriteInteger(n int64) error {
-	_, err := fmt.Fprintf(w.wr, ":%d\r\n", n)
-	if err != nil {
+	if err := w.writeTypedInt(':', n); err != nil {
 		return err
 	}
-	return w.wr.Flush()
+	return w.flush()
 }
 
 // WriteBulkString writes a bulk string response
 func (w *Writer) WriteBulkString(s []byte) error {
-	_, err := fmt.Fprintf(w.wr, "$%d\r\n", len(s))
-	if err != nil {
+	if err := w.writeTypedInt('$', int64(len(s))); err != nil {
 		return err
 	}
-	_, err = w.wr.Write(s)
-	if err != nil {
+	if _, err := w.wr.Write(s); err != nil {
 		return err
 	}
-	_, err = w.wr.WriteString("\r\n")
-	if err != nil {
+	if _, err := w.wr.Write(crlfBytes); err != nil {
 		return err
 	}
-	return w.wr.Flush()
+	return w.flush()
 }
 
 // WriteNull writes a null bulk string response
 func (w *Writer) WriteNull() error {
-	_, err := w.wr.WriteString("$-1\r\n")
-	if err != nil {
+	if _, err := w.wr.Write(nullBytes); err != nil {
 		return err
 	}
-	return w.wr.Flush()
+	return w.flush()
 }
 
 // WriteArray writes an array of bulk strings
 func (w *Writer) WriteArray(items [][]byte) error {
-	_, err := fmt.Fprintf(w.wr, "*%d\r\n", len(items))
-	if err != nil {
+	if err := w.writeTypedInt('*', int64(len(items))); err != nil {
 		return err
 	}
 	for _, item := range items {
-		_, err = fmt.Fprintf(w.wr, "$%d\r\n", len(item))
-		if err != nil {
+		if err := w.writeTypedInt('$', int64(len(item))); err != nil {
 			return err
 		}
-		_, err = w.wr.Write(item)
-		if err != nil {
+		if _, err := w.wr.Write(item); err != nil {
 			return err
 		}
-		_, err = w.wr.WriteString("\r\n")
-		if err != nil {
+		if _, err := w.wr.Write(crlfBytes); err != nil {
 			return err
 		}
 	}
-	return w.wr.Flush()
+	return w.flush()
 }
 
-// WriteStringArray writes an array of strings
+// WriteStringArray writes an array of strings (avoids []byte conversion allocations).
 func (w *Writer) WriteStringArray(items []string) error {
-	byteItems := make([][]byte, len(items))
-	for i, item := range items {
-		byteItems[i] = []byte(item)
+	if err := w.writeTypedInt('*', int64(len(items))); err != nil {
+		return err
 	}
-	return w.WriteArray(byteItems)
+	for _, item := range items {
+		if err := w.writeTypedInt('$', int64(len(item))); err != nil {
+			return err
+		}
+		if _, err := w.wr.WriteString(item); err != nil {
+			return err
+		}
+		if _, err := w.wr.Write(crlfBytes); err != nil {
+			return err
+		}
+	}
+	return w.flush()
 }
 
 // WriteArrayWithNulls writes an array where some elements may be null
 func (w *Writer) WriteArrayWithNulls(items [][]byte, nulls []bool) error {
-	_, err := fmt.Fprintf(w.wr, "*%d\r\n", len(items))
-	if err != nil {
+	if err := w.writeTypedInt('*', int64(len(items))); err != nil {
 		return err
 	}
 	for i, item := range items {
 		if nulls[i] {
-			_, err = w.wr.WriteString("$-1\r\n")
+			if _, err := w.wr.Write(nullBytes); err != nil {
+				return err
+			}
 		} else {
-			_, err = fmt.Fprintf(w.wr, "$%d\r\n", len(item))
-			if err != nil {
+			if err := w.writeTypedInt('$', int64(len(item))); err != nil {
 				return err
 			}
-			_, err = w.wr.Write(item)
-			if err != nil {
+			if _, err := w.wr.Write(item); err != nil {
 				return err
 			}
-			_, err = w.wr.WriteString("\r\n")
-		}
-		if err != nil {
-			return err
+			if _, err := w.wr.Write(crlfBytes); err != nil {
+				return err
+			}
 		}
 	}
-	return w.wr.Flush()
+	return w.flush()
 }
 
 // WriteRaw writes raw bytes directly to the connection
@@ -310,14 +388,13 @@ func (w *Writer) WriteRaw(data []byte) error {
 	if err != nil {
 		return err
 	}
-	return w.wr.Flush()
+	return w.flush()
 }
 
 // WriteArrayHeader writes only the array header (for incremental array building)
 func (w *Writer) WriteArrayHeader(count int) error {
-	_, err := fmt.Fprintf(w.wr, "*%d\r\n", count)
-	if err != nil {
+	if err := w.writeTypedInt('*', int64(count)); err != nil {
 		return err
 	}
-	return w.wr.Flush()
+	return w.flush()
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useContext, useState, ReactNode } from 'react';
+import { createContext, useContext, useState, useCallback, ReactNode } from 'react';
 
 interface ToastContextType {
   message: string;
@@ -17,17 +17,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const [type, setType] = useState<'success' | 'error' | 'info'>('success');
   const [show, setShow] = useState(false);
 
-  const showToast = (msg: string, t: 'success' | 'error' | 'info' = 'success') => {
+  const showToast = useCallback((msg: string, t: 'success' | 'error' | 'info' = 'success') => {
     setMessage(msg);
     setType(t);
     setShow(true);
-    
-    setTimeout(() => {
-      setShow(false);
-    }, 3000);
-  };
+    setTimeout(() => setShow(false), 3000);
+  }, []);
 
-  const hideToast = () => setShow(false);
+  const hideToast = useCallback(() => setShow(false), []);
 
   return (
     <ToastContext.Provider value={{ message, type, show, showToast, hideToast }}>
@@ -38,8 +35,6 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
 export function useToast() {
   const context = useContext(ToastContext);
-  if (!context) {
-    throw new Error('useToast must be used within a ToastProvider');
-  }
+  if (!context) throw new Error('useToast must be used within a ToastProvider');
   return context;
 }

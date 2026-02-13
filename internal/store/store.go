@@ -2,6 +2,9 @@
 package store
 
 import (
+	"fmt"
+	"math/rand"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -19,6 +22,9 @@ type Store struct {
 	mu         sync.RWMutex
 	data       map[string]*Entry
 	sortedSets map[string]*SortedSet
+	hashes     map[string]*Hash
+	lists      map[string]*List
+	sets       map[string]*Set
 	stopGC     chan struct{}
 }
 
@@ -38,6 +44,9 @@ func New() *Store {
 	s := &Store{
 		data:       make(map[string]*Entry),
 		sortedSets: make(map[string]*SortedSet),
+		hashes:     make(map[string]*Hash),
+		lists:      make(map[string]*List),
+		sets:       make(map[string]*Set),
 		stopGC:     make(chan struct{}),
 	}
 	go s.gcLoop()
@@ -59,17 +68,71 @@ func (s *Store) gcLoop() {
 	}
 }
 
-// removeExpired removes all expired keys.
+// removeExpired uses Redis-style sampling to probabilistically remove expired keys.
+// Algorithm: sample up to 20 random keys. Delete expired ones.
+// If more than 25% of the sample was expired, repeat immediately (up to a bounded number of rounds).
+// This avoids the O(N) full scan under write lock that previously blocked all operations.
 func (s *Store) removeExpired() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	const (
+		sampleSize   = 20
+		maxRounds    = 4
+		expiredRatio = 0.25
+	)
 
-	now := time.Now()
-	for key, entry := range s.data {
-		if entry.HasExpire && now.After(entry.ExpireAt) {
-			delete(s.data, key)
+	for round := 0; round < maxRounds; round++ {
+		s.mu.Lock()
+
+		n := len(s.data)
+		if n == 0 {
+			s.mu.Unlock()
+			return
+		}
+
+		// Collect all keys into a slice for random sampling.
+		// For very large datasets this could be optimized with a separate expiry index,
+		// but for now a random sample from the key space is adequate.
+		now := time.Now()
+		sampled := 0
+		expired := 0
+
+		// Use map iteration which is pseudo-random in Go
+		for key, entry := range s.data {
+			if sampled >= sampleSize {
+				break
+			}
+			sampled++
+			if entry.HasExpire && now.After(entry.ExpireAt) {
+				delete(s.data, key)
+				expired++
+			}
+		}
+
+		s.mu.Unlock()
+
+		// If fewer than 25% of sampled keys were expired, stop
+		if sampled == 0 || float64(expired)/float64(sampled) < expiredRatio {
+			return
 		}
 	}
+}
+
+// expiredKeySample picks up to n random keys that have expiration set.
+// This is a helper for future advanced GC strategies.
+func (s *Store) expiredKeySample(n int) []string {
+	keys := make([]string, 0, n)
+	for k, entry := range s.data {
+		if entry.HasExpire {
+			keys = append(keys, k)
+			if len(keys) >= n {
+				break
+			}
+		}
+	}
+	// Shuffle to avoid map iteration bias
+	rand.Shuffle(len(keys), func(i, j int) {
+		keys[i], keys[j] = keys[j], keys[i]
+	})
+	return keys
 }
 
 // Close stops the background GC goroutine.
@@ -244,6 +307,9 @@ func (s *Store) Clear() {
 	defer s.mu.Unlock()
 	s.data = make(map[string]*Entry)
 	s.sortedSets = make(map[string]*SortedSet)
+	s.hashes = make(map[string]*Hash)
+	s.lists = make(map[string]*List)
+	s.sets = make(map[string]*Set)
 }
 
 // Append appends value to existing key. Returns new length.
@@ -605,5 +671,516 @@ func (s *Store) ZExists(key string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	_, exists := s.sortedSets[key]
+	return exists
+}
+
+// ========================
+// Float Helpers
+// ========================
+
+func parseFloat64(b []byte) (float64, error) {
+	return strconv.ParseFloat(string(b), 64)
+}
+
+func formatFloat64(f float64) []byte {
+	return []byte(strconv.FormatFloat(f, 'f', -1, 64))
+}
+
+// ========================
+// Hash Operations
+// ========================
+
+// HSet sets field(s) in a hash. Returns number of new fields added.
+func (s *Store) HSet(key string, fields ...HashFieldValue) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	h, exists := s.hashes[key]
+	if !exists {
+		h = NewHash()
+		s.hashes[key] = h
+	}
+	added := 0
+	for _, fv := range fields {
+		if h.Set(fv.Field, fv.Value) {
+			added++
+		}
+	}
+	return added
+}
+
+// HGet returns the value of a hash field.
+func (s *Store) HGet(key, field string) ([]byte, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	h, exists := s.hashes[key]
+	if !exists {
+		return nil, false
+	}
+	return h.Get(field)
+}
+
+// HDel removes field(s) from a hash. Returns number removed.
+func (s *Store) HDel(key string, fields ...string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	h, exists := s.hashes[key]
+	if !exists {
+		return 0
+	}
+	removed := h.Del(fields...)
+	if h.Len() == 0 {
+		delete(s.hashes, key)
+	}
+	return removed
+}
+
+// HExists returns whether a field exists in a hash.
+func (s *Store) HExists(key, field string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	h, exists := s.hashes[key]
+	if !exists {
+		return false
+	}
+	return h.Exists(field)
+}
+
+// HLen returns the number of fields in a hash.
+func (s *Store) HLen(key string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	h, exists := s.hashes[key]
+	if !exists {
+		return 0
+	}
+	return h.Len()
+}
+
+// HGetAll returns all field-value pairs in a hash.
+func (s *Store) HGetAll(key string) []HashFieldValue {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	h, exists := s.hashes[key]
+	if !exists {
+		return nil
+	}
+	return h.GetAll()
+}
+
+// HKeys returns all field names in a hash.
+func (s *Store) HKeys(key string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	h, exists := s.hashes[key]
+	if !exists {
+		return nil
+	}
+	return h.Keys()
+}
+
+// HVals returns all values in a hash.
+func (s *Store) HVals(key string) [][]byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	h, exists := s.hashes[key]
+	if !exists {
+		return nil
+	}
+	return h.Vals()
+}
+
+// HIncrBy increments integer value of a hash field.
+func (s *Store) HIncrBy(key, field string, delta int64) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	h, exists := s.hashes[key]
+	if !exists {
+		h = NewHash()
+		s.hashes[key] = h
+	}
+	return h.IncrBy(field, delta)
+}
+
+// HIncrByFloat increments float value of a hash field.
+func (s *Store) HIncrByFloat(key, field string, delta float64) (float64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	h, exists := s.hashes[key]
+	if !exists {
+		h = NewHash()
+		s.hashes[key] = h
+	}
+	return h.IncrByFloat(field, delta)
+}
+
+// HSetNX sets a field only if it does not exist. Returns true if set.
+func (s *Store) HSetNX(key, field string, value []byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	h, exists := s.hashes[key]
+	if !exists {
+		h = NewHash()
+		s.hashes[key] = h
+	}
+	return h.SetNX(field, value)
+}
+
+// HashExists checks if a hash key exists.
+func (s *Store) HashExists(key string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, exists := s.hashes[key]
+	return exists
+}
+
+// ========================
+// List Operations
+// ========================
+
+// LPush prepends values to a list. Returns new length.
+func (s *Store) LPush(key string, values ...[]byte) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	l, exists := s.lists[key]
+	if !exists {
+		l = NewList()
+		s.lists[key] = l
+	}
+	return l.LPush(values...)
+}
+
+// RPush appends values to a list. Returns new length.
+func (s *Store) RPush(key string, values ...[]byte) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	l, exists := s.lists[key]
+	if !exists {
+		l = NewList()
+		s.lists[key] = l
+	}
+	return l.RPush(values...)
+}
+
+// LPop removes and returns the first element.
+func (s *Store) LPop(key string) ([]byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	l, exists := s.lists[key]
+	if !exists {
+		return nil, false
+	}
+	val, ok := l.LPop()
+	if l.Len() == 0 {
+		delete(s.lists, key)
+	}
+	return val, ok
+}
+
+// RPop removes and returns the last element.
+func (s *Store) RPop(key string) ([]byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	l, exists := s.lists[key]
+	if !exists {
+		return nil, false
+	}
+	val, ok := l.RPop()
+	if l.Len() == 0 {
+		delete(s.lists, key)
+	}
+	return val, ok
+}
+
+// LLen returns the length of a list.
+func (s *Store) LLen(key string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	l, exists := s.lists[key]
+	if !exists {
+		return 0
+	}
+	return l.Len()
+}
+
+// LIndex returns the element at the given index.
+func (s *Store) LIndex(key string, index int) ([]byte, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	l, exists := s.lists[key]
+	if !exists {
+		return nil, false
+	}
+	return l.Index(index)
+}
+
+// LSet sets the element at index.
+func (s *Store) LSet(key string, index int, value []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	l, exists := s.lists[key]
+	if !exists {
+		return fmt.Errorf("no such key")
+	}
+	return l.Set(index, value)
+}
+
+// LRange returns elements from start to stop.
+func (s *Store) LRange(key string, start, stop int) [][]byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	l, exists := s.lists[key]
+	if !exists {
+		return nil
+	}
+	return l.Range(start, stop)
+}
+
+// LInsert inserts value before/after pivot.
+func (s *Store) LInsert(key string, before bool, pivot, value []byte) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	l, exists := s.lists[key]
+	if !exists {
+		return 0
+	}
+	return l.Insert(before, pivot, value)
+}
+
+// LRem removes count occurrences of value.
+func (s *Store) LRem(key string, count int, value []byte) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	l, exists := s.lists[key]
+	if !exists {
+		return 0
+	}
+	removed := l.Rem(count, value)
+	if l.Len() == 0 {
+		delete(s.lists, key)
+	}
+	return removed
+}
+
+// LTrim trims the list to elements between start and stop.
+func (s *Store) LTrim(key string, start, stop int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	l, exists := s.lists[key]
+	if !exists {
+		return
+	}
+	l.Trim(start, stop)
+	if l.Len() == 0 {
+		delete(s.lists, key)
+	}
+}
+
+// ListExists checks if a list key exists.
+func (s *Store) ListExists(key string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, exists := s.lists[key]
+	return exists
+}
+
+// ========================
+// Set Operations
+// ========================
+
+// SAdd adds members to a set. Returns number added.
+func (s *Store) SAdd(key string, members ...string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	set, exists := s.sets[key]
+	if !exists {
+		set = NewSet()
+		s.sets[key] = set
+	}
+	return set.Add(members...)
+}
+
+// SRem removes members from a set. Returns number removed.
+func (s *Store) SRem(key string, members ...string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	set, exists := s.sets[key]
+	if !exists {
+		return 0
+	}
+	removed := set.Rem(members...)
+	if set.Card() == 0 {
+		delete(s.sets, key)
+	}
+	return removed
+}
+
+// SIsMember returns whether a member exists in a set.
+func (s *Store) SIsMember(key, member string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	set, exists := s.sets[key]
+	if !exists {
+		return false
+	}
+	return set.IsMember(member)
+}
+
+// SCard returns the cardinality of a set.
+func (s *Store) SCard(key string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	set, exists := s.sets[key]
+	if !exists {
+		return 0
+	}
+	return set.Card()
+}
+
+// SMembers returns all members of a set.
+func (s *Store) SMembers(key string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	set, exists := s.sets[key]
+	if !exists {
+		return nil
+	}
+	return set.Members()
+}
+
+// SRandMember returns random member(s) from a set.
+func (s *Store) SRandMember(key string, count int) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	set, exists := s.sets[key]
+	if !exists {
+		return nil
+	}
+	return set.RandMember(count)
+}
+
+// SPop removes and returns random member(s).
+func (s *Store) SPop(key string, count int) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	set, exists := s.sets[key]
+	if !exists {
+		return nil
+	}
+	result := set.Pop(count)
+	if set.Card() == 0 {
+		delete(s.sets, key)
+	}
+	return result
+}
+
+// SInter returns intersection of multiple sets.
+func (s *Store) SInter(keys ...string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if len(keys) == 0 {
+		return nil
+	}
+
+	first, exists := s.sets[keys[0]]
+	if !exists {
+		return nil
+	}
+
+	others := make([]*Set, 0, len(keys)-1)
+	for _, key := range keys[1:] {
+		other, exists := s.sets[key]
+		if !exists {
+			return nil // Intersection with empty set is empty
+		}
+		others = append(others, other)
+	}
+	return first.Inter(others...)
+}
+
+// SUnion returns union of multiple sets.
+func (s *Store) SUnion(keys ...string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if len(keys) == 0 {
+		return nil
+	}
+
+	first, exists := s.sets[keys[0]]
+	if !exists {
+		first = NewSet() // Treat missing key as empty set
+	}
+
+	others := make([]*Set, 0, len(keys)-1)
+	for _, key := range keys[1:] {
+		other, exists := s.sets[key]
+		if !exists {
+			continue
+		}
+		others = append(others, other)
+	}
+	return first.Union(others...)
+}
+
+// SDiff returns members in first set not in any others.
+func (s *Store) SDiff(keys ...string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if len(keys) == 0 {
+		return nil
+	}
+
+	first, exists := s.sets[keys[0]]
+	if !exists {
+		return nil
+	}
+
+	others := make([]*Set, 0, len(keys)-1)
+	for _, key := range keys[1:] {
+		other, exists := s.sets[key]
+		if !exists {
+			continue
+		}
+		others = append(others, other)
+	}
+	return first.Diff(others...)
+}
+
+// SetExists checks if a set key exists.
+func (s *Store) SetExists(key string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, exists := s.sets[key]
 	return exists
 }

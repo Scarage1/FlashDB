@@ -122,3 +122,63 @@ func TestWAL_Clear(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, records)
 }
+
+func TestWAL_AppendNoSyncAndSync(t *testing.T) {
+	tmpDir := t.TempDir()
+	walPath := filepath.Join(tmpDir, "test.wal")
+
+	w, err := Open(walPath)
+	require.NoError(t, err)
+	defer w.Close()
+
+	// Write several records without syncing
+	for i := 0; i < 5; i++ {
+		err = w.AppendNoSync(Record{Type: OpSet, Key: []byte("k"), Value: []byte("v")})
+		require.NoError(t, err)
+	}
+
+	// Explicit sync
+	require.NoError(t, w.Sync())
+
+	records, err := w.ReadAll()
+	require.NoError(t, err)
+	require.Len(t, records, 5)
+}
+
+// ---------------------------------------------------------------------------
+// Benchmarks
+// ---------------------------------------------------------------------------
+
+func BenchmarkWALAppend(b *testing.B) {
+	w, _ := Open(filepath.Join(b.TempDir(), "bench.wal"))
+	defer w.Close()
+	rec := Record{Type: OpSet, Key: []byte("key"), Value: []byte("value")}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		w.Append(rec)
+	}
+}
+
+func BenchmarkWALAppendNoSync(b *testing.B) {
+	w, _ := Open(filepath.Join(b.TempDir(), "bench.wal"))
+	defer w.Close()
+	rec := Record{Type: OpSet, Key: []byte("key"), Value: []byte("value")}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		w.AppendNoSync(rec)
+	}
+	w.Sync()
+}
+
+func BenchmarkWALAppendBatch(b *testing.B) {
+	w, _ := Open(filepath.Join(b.TempDir(), "bench.wal"))
+	defer w.Close()
+	batch := make([]Record, 50)
+	for i := range batch {
+		batch[i] = Record{Type: OpSet, Key: []byte("key"), Value: []byte("value")}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		w.AppendBatch(batch)
+	}
+}

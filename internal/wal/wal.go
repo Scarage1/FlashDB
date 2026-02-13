@@ -20,6 +20,34 @@ const (
 	OpSetWithTTL byte = 0x03
 	OpExpire     byte = 0x04
 	OpPersist    byte = 0x05
+
+	// Sorted set operations
+	OpZAdd             byte = 0x10
+	OpZRem             byte = 0x11
+	OpZIncrBy          byte = 0x12
+	OpZRemRangeByRank  byte = 0x13
+	OpZRemRangeByScore byte = 0x14
+
+	// Hash operations
+	OpHSet byte = 0x20
+	OpHDel byte = 0x21
+
+	// List operations
+	OpLPush byte = 0x30
+	OpRPush byte = 0x31
+	OpLPop  byte = 0x32
+	OpRPop  byte = 0x33
+	OpLSet  byte = 0x34
+	OpLTrim byte = 0x35
+
+	// Set operations
+	OpSAdd byte = 0x40
+	OpSRem byte = 0x41
+	OpSPop byte = 0x42
+
+	// Time-series operations
+	OpTSAdd byte = 0x50
+	OpTSDel byte = 0x51
 )
 
 // Header size: CRC32 (4) + Type (1) + KeyLen (4) + ValueLen (4) + TTL (8) = 21 bytes
@@ -38,6 +66,15 @@ type Record struct {
 	Key      []byte
 	Value    []byte
 	ExpireAt int64 // Unix timestamp in milliseconds, 0 means no expiration
+}
+
+// bufPool pools byte slices used for record encoding to reduce allocations
+// during high-throughput batch writes.
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 0, 4096)
+		return &b
+	},
 }
 
 // WAL represents a Write-Ahead Log
@@ -88,6 +125,63 @@ func (w *WAL) Append(rec Record) error {
 	}
 
 	return nil
+}
+
+// AppendBatch writes multiple records to the WAL atomically.
+// All records are written into a pooled buffer and flushed + synced once,
+// which is more efficient and ensures atomicity for multi-key operations.
+func (w *WAL) AppendBatch(records []Record) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if _, err := w.file.Seek(0, io.SeekEnd); err != nil {
+		return fmt.Errorf("wal: failed to seek to end: %w", err)
+	}
+
+	// Accumulate into a pooled buffer so we issue a single write syscall.
+	bp := bufPool.Get().(*[]byte)
+	buf := (*bp)[:0]
+	for _, rec := range records {
+		buf = appendEncodedRecord(buf, rec)
+	}
+	_, err := w.file.Write(buf)
+	*bp = buf
+	bufPool.Put(bp)
+	if err != nil {
+		return fmt.Errorf("wal: failed to write records: %w", err)
+	}
+
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("wal: failed to sync: %w", err)
+	}
+
+	return nil
+}
+
+// AppendNoSync writes a record to the WAL without calling fsync.
+// The caller must call Sync() explicitly when the batch is complete.
+// This is useful in pipeline mode where many commands arrive in quick
+// succession and a single fsync at the end is sufficient.
+func (w *WAL) AppendNoSync(rec Record) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if _, err := w.file.Seek(0, io.SeekEnd); err != nil {
+		return fmt.Errorf("wal: failed to seek to end: %w", err)
+	}
+
+	data := encodeRecord(rec)
+	if _, err := w.file.Write(data); err != nil {
+		return fmt.Errorf("wal: failed to write record: %w", err)
+	}
+	return nil
+}
+
+// Sync flushes the WAL file to durable storage.
+func (w *WAL) Sync() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.file.Sync()
 }
 
 // ReadAll reads all valid records from the WAL.
@@ -156,6 +250,37 @@ func (w *WAL) Clear() error {
 	}
 
 	return w.file.Sync()
+}
+
+// appendEncodedRecord appends the encoded form of rec to dst (growing the
+// slice as needed) and returns the extended slice. This lets AppendBatch
+// accumulate many records into a single pooled buffer.
+func appendEncodedRecord(dst []byte, rec Record) []byte {
+	keyLen := len(rec.Key)
+	valueLen := len(rec.Value)
+	totalLen := headerSize + keyLen + valueLen
+
+	// Grow dst to fit the new record.
+	off := len(dst)
+	if cap(dst)-off < totalLen {
+		grown := make([]byte, off, off+totalLen+512) // extra headroom
+		copy(grown, dst)
+		dst = grown
+	}
+	dst = dst[:off+totalLen]
+	data := dst[off:]
+
+	data[4] = rec.Type
+	binary.LittleEndian.PutUint32(data[5:9], uint32(keyLen))
+	binary.LittleEndian.PutUint32(data[9:13], uint32(valueLen))
+	binary.LittleEndian.PutUint64(data[13:21], uint64(rec.ExpireAt))
+	copy(data[21:21+keyLen], rec.Key)
+	copy(data[21+keyLen:], rec.Value)
+
+	checksum := crc32.ChecksumIEEE(data[4:])
+	binary.LittleEndian.PutUint32(data[0:4], checksum)
+
+	return dst
 }
 
 // encodeRecord encodes a record into bytes with CRC32 checksum.
