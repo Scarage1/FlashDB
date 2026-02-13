@@ -104,7 +104,7 @@ export default function DashboardPage() {
     setKeysHistory((h) => [...h.slice(-29), data.keys]);
   }, [info]);
 
-  useEffect(() => { fetchInfo(); const id = setInterval(fetchInfo, 2000); return () => clearInterval(id); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  useEffect(() => { fetchInfo(); const id = setInterval(fetchInfo, 2000); return () => clearInterval(id); }, [fetchInfo]);
 
   const opsDelta = prevInfo ? info.ops - prevInfo.ops : 0;
   const kpiCards = [

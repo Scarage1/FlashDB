@@ -118,9 +118,9 @@ func (t *Tracker) decayLoop() {
 type entryHeap []Entry
 
 func (h entryHeap) Len() int            { return len(h) }
-func (h entryHeap) Less(i, j int) bool   { return h[i].Count < h[j].Count }
-func (h entryHeap) Swap(i, j int)        { h[i], h[j] = h[j], h[i] }
-func (h *entryHeap) Push(x interface{})  { *h = append(*h, x.(Entry)) }
+func (h entryHeap) Less(i, j int) bool  { return h[i].Count < h[j].Count }
+func (h entryHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
+func (h *entryHeap) Push(x interface{}) { *h = append(*h, x.(Entry)) }
 
 func (h *entryHeap) Pop() interface{} {
 	old := *h

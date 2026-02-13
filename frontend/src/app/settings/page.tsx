@@ -2,10 +2,9 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { Settings as SettingsIcon, Server, RefreshCw, Database, Shield, ExternalLink, Github, FileText, BookOpen, MessageSquare } from 'lucide-react';
+import { Server, RefreshCw, Database, Shield, ExternalLink, Github, FileText, BookOpen, MessageSquare } from 'lucide-react';
 import { executeCommand } from '@/lib/api';
 import PageHeader from '@/components/ui/PageHeader';
-import Badge from '@/components/ui/Badge';
 import EmptyState from '@/components/ui/EmptyState';
 import { SkeletonTable } from '@/components/ui/Skeleton';
 

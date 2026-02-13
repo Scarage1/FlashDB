@@ -3,7 +3,6 @@ package store
 
 import (
 	"fmt"
-	"math/rand"
 	"strconv"
 	"sync"
 	"time"
@@ -114,25 +113,6 @@ func (s *Store) removeExpired() {
 			return
 		}
 	}
-}
-
-// expiredKeySample picks up to n random keys that have expiration set.
-// This is a helper for future advanced GC strategies.
-func (s *Store) expiredKeySample(n int) []string {
-	keys := make([]string, 0, n)
-	for k, entry := range s.data {
-		if entry.HasExpire {
-			keys = append(keys, k)
-			if len(keys) >= n {
-				break
-			}
-		}
-	}
-	// Shuffle to avoid map iteration bias
-	rand.Shuffle(len(keys), func(i, j int) {
-		keys[i], keys[j] = keys[j], keys[i]
-	})
-	return keys
 }
 
 // Close stops the background GC goroutine.

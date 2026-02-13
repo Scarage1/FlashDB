@@ -112,7 +112,7 @@ export default function ExplorerPage() {
             </div>
           </div>
           <div className="flex-1 overflow-y-auto p-1.5">
-            {loading ? Array.from({ length: 8 }).map((_, i) => <div key={i} className="px-3 py-2"><SkeletonLine width={`${60 + Math.random() * 30}%`} height="14px" /></div>) :
+            {loading ? Array.from({ length: 8 }).map((_, i) => <div key={i} className="px-3 py-2"><SkeletonLine width={`${60 + (i * 5) % 30}%`} height="14px" /></div>) :
               !filtered.length ? (
                 <EmptyState icon={<Database size={24} />} title={keys.length ? 'No match' : 'No keys yet'} description={keys.length ? 'Try a different filter' : 'Add your first key to get started'} />
               ) : filtered.map((key) => (

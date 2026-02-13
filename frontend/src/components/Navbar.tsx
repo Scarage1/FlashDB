@@ -6,7 +6,7 @@ import { usePathname } from 'next/navigation';
 import { useTheme } from '@/context/ThemeContext';
 import { FlashLogo } from '@/components/ui/Logo';
 import StatusDot from '@/components/ui/StatusDot';
-import { Sun, Moon, Search, Menu, X, Terminal, Database, Activity, Flame, LineChart, Camera, Radio, Gauge, Settings, ChevronDown, ExternalLink } from 'lucide-react';
+import { Sun, Moon, Search, Menu, X, Flame, LineChart, Camera, Radio, Gauge, Settings, ChevronDown, ExternalLink } from 'lucide-react';
 
 interface NavbarProps { onCommandPalette: () => void; }
 

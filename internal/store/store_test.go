@@ -47,7 +47,7 @@ func TestStore_TTL(t *testing.T) {
 
 	time.Sleep(150 * time.Millisecond)
 
-	val, ok = s.Get("key1")
+	_, ok = s.Get("key1")
 	assert.False(t, ok)
 }
 

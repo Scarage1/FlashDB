@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/flashdb/flashdb/internal/engine"
@@ -30,7 +29,6 @@ type Server struct {
 	engine    *engine.Engine
 	server    *http.Server
 	startTime time.Time
-	mu        sync.RWMutex
 	apiToken  string // shared secret for API auth (empty = no auth)
 }
 

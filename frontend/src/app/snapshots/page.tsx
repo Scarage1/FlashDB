@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Camera, Plus, RotateCcw, Trash2, Download, HardDrive, Clock, FileText, RefreshCw } from 'lucide-react';
+import { Camera, Plus, RotateCcw, Trash2, HardDrive, Clock, FileText, RefreshCw } from 'lucide-react';
 import { listSnapshots, createSnapshot, restoreSnapshot, deleteSnapshot, type SnapshotMeta } from '@/lib/api';
 import { useToast } from '@/context/ToastContext';
 import PageHeader from '@/components/ui/PageHeader';
@@ -146,7 +146,7 @@ export default function SnapshotsPage() {
               <h3 className="font-display text-lg font-bold mb-4" style={{ color: 'var(--text-primary)' }}>Create Snapshot</h3>
               <div>
                 <label className="text-xs font-semibold mb-1.5 block" style={{ color: 'var(--text-secondary)' }}>Name (optional)</label>
-                <input value={newName} onChange={(e) => setNewName(e.target.value)} className="input-field" placeholder={`snapshot-${Date.now()}`}
+                <input value={newName} onChange={(e) => setNewName(e.target.value)} className="input-field" placeholder="my-snapshot"
                   onKeyDown={(e) => e.key === 'Enter' && handleCreate()} autoFocus />
               </div>
               <div className="flex justify-end gap-2 mt-5">
