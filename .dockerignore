@@ -1,0 +1,43 @@
+# Git
+.git
+.github
+.gitignore
+
+# Build artifacts
+flashdb
+flashdb.exe
+flashdb-benchmark
+*.wal
+
+# Data
+data/
+flashdb-data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test / coverage
+coverage.out
+*.test
+*.prof
+.gocache/
+
+# Docs (not needed in image)
+docs/
+*.md
+!frontend/README.md
+LICENSE
+CONTRIBUTING.md
+ROADMAP.md
+
+# Frontend build cache (we COPY frontend/ separately)
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/tsconfig.tsbuildinfo

@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -38,20 +39,42 @@ import (
 	"github.com/flashdb/flashdb/internal/web"
 )
 
+// envOrDefault returns the environment variable value if set, otherwise the fallback.
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// envIntOrDefault returns the environment variable as int if set, otherwise the fallback.
+func envIntOrDefault(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
 func main() {
-	addr := flag.String("addr", ":6379", "Server address")
-	dataDir := flag.String("data", "data", "Data directory")
-	requirePass := flag.String("requirepass", "", "Password for AUTH command")
-	maxClients := flag.Int("maxclients", 10000, "Maximum number of clients")
-	timeout := flag.Int("timeout", 0, "Client timeout in seconds (0 = no timeout)")
-	tlsCert := flag.String("tls-cert", "", "Path to TLS certificate PEM file")
-	tlsKey := flag.String("tls-key", "", "Path to TLS private key PEM file")
-	rateLimit := flag.Int("ratelimit", 0, "Max commands/sec per client (0 = unlimited)")
-	slowLogUS := flag.Int("slowlog-threshold", 0, "Slow query threshold in microseconds (0 = disabled)")
-	apiToken := flag.String("api-token", "", "Bearer token for web API authentication")
-	logLevel := flag.String("loglevel", "info", "Log level: debug, info, warn, error")
-	webAddr := flag.String("webaddr", ":8080", "Web UI & API address")
-	noWeb := flag.Bool("noweb", false, "Disable web UI")
+	// Flags take precedence over environment variables.
+	// Env vars: FLASHDB_ADDR, FLASHDB_DATA, FLASHDB_PASSWORD, FLASHDB_API_TOKEN,
+	//           FLASHDB_MAXCLIENTS, FLASHDB_TIMEOUT, FLASHDB_WEB_ADDR,
+	//           FLASHDB_LOG_LEVEL, FLASHDB_NO_WEB
+	addr := flag.String("addr", envOrDefault("FLASHDB_ADDR", ":6379"), "Server address")
+	dataDir := flag.String("data", envOrDefault("FLASHDB_DATA", "data"), "Data directory")
+	requirePass := flag.String("requirepass", envOrDefault("FLASHDB_PASSWORD", ""), "Password for AUTH command")
+	maxClients := flag.Int("maxclients", envIntOrDefault("FLASHDB_MAXCLIENTS", 10000), "Maximum number of clients")
+	timeout := flag.Int("timeout", envIntOrDefault("FLASHDB_TIMEOUT", 0), "Client timeout in seconds (0 = no timeout)")
+	tlsCert := flag.String("tls-cert", envOrDefault("FLASHDB_TLS_CERT", ""), "Path to TLS certificate PEM file")
+	tlsKey := flag.String("tls-key", envOrDefault("FLASHDB_TLS_KEY", ""), "Path to TLS private key PEM file")
+	rateLimit := flag.Int("ratelimit", envIntOrDefault("FLASHDB_RATELIMIT", 0), "Max commands/sec per client (0 = unlimited)")
+	slowLogUS := flag.Int("slowlog-threshold", envIntOrDefault("FLASHDB_SLOWLOG_THRESHOLD", 0), "Slow query threshold in microseconds (0 = disabled)")
+	apiToken := flag.String("api-token", envOrDefault("FLASHDB_API_TOKEN", ""), "Bearer token for web API authentication")
+	logLevel := flag.String("loglevel", envOrDefault("FLASHDB_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
+	webAddr := flag.String("webaddr", envOrDefault("FLASHDB_WEB_ADDR", ":8080"), "Web UI & API address")
+	noWeb := flag.Bool("noweb", os.Getenv("FLASHDB_NO_WEB") == "true", "Disable web UI")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	flag.Parse()
 

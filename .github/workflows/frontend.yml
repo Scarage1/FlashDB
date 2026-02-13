@@ -75,5 +75,5 @@ jobs:
         if: github.event_name == 'push'
         with:
           name: frontend-build
-          path: frontend/.next
+          path: frontend/out
           retention-days: 7

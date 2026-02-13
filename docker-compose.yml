@@ -1,0 +1,30 @@
+# docker-compose.yml — Local development & testing
+# Usage: docker compose up --build
+
+services:
+  flashdb:
+    build:
+      context: .
+      args:
+        VERSION: dev
+        BUILD_TIME: "${BUILD_TIME:-unknown}"
+    container_name: flashdb
+    ports:
+      - "6379:6379"   # RESP protocol
+      - "8080:8080"   # Web UI & REST API
+    volumes:
+      - flashdb-data:/data
+    environment:
+      - FLASHDB_ADDR=:6379
+      - FLASHDB_DATA=/data
+    healthcheck:
+      test: ["CMD", "/flashdb", "-version"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  flashdb-data:
+    driver: local

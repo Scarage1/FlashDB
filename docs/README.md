@@ -1,12 +1,10 @@
-# FlashDB Docs
+# FlashDB Documentation
 
-This folder contains the maintained documentation for the current codebase.
+Technical reference for FlashDB internals and wire protocol.
 
-## Contents
-
-- [`COMMANDS.md`](COMMANDS.md): command-level reference.
-- [`PROTOCOL.md`](PROTOCOL.md): RESP protocol notes and wire examples.
-
-## Scope
-
-This documentation set is intentionally small for now so it stays accurate while the project is being upgraded.
+| Document | Description |
+|----------|-------------|
+| [COMMANDS.md](COMMANDS.md) | Complete command reference with syntax and examples |
+| [PROTOCOL.md](PROTOCOL.md) | RESP wire protocol specification |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Internal architecture and design decisions |
+| [API.md](API.md) | REST API endpoints (`/api/v1/*`) |
