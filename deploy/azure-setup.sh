@@ -23,8 +23,8 @@
 set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────────
-RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-flashdb-rg}"
-LOCATION="${AZURE_LOCATION:-eastus}"
+RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-flashdb-prod}"
+LOCATION="${AZURE_LOCATION:-centralindia}"
 CONTAINER_ENV="${AZURE_CONTAINER_ENV:-flashdb-env}"
 APP_NAME="${AZURE_APP_NAME:-flashdb}"
 IMAGE="${GHCR_IMAGE:-ghcr.io/scarage1/flashdb:master}"

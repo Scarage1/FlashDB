@@ -35,6 +35,10 @@ frontend/.next/
 frontend/out/
 frontend/.env.local
 frontend/.env*.local
+frontend/tsconfig.tsbuildinfo
+
+# Deployment secrets (never commit)
+DEPLOYMENT_SETUP.md
 
 # Logs
 *.log

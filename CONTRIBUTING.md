@@ -28,14 +28,14 @@ This project and everyone participating in it is governed by our commitment to p
 
 2. **Set Up Remote**
    ```bash
-   git remote add upstream https://github.com/flashdb/flashdb.git
+   git remote add upstream https://github.com/Scarage1/FlashDB.git
    ```
 
 ## How to Contribute
 
 ### Reporting Bugs
 
-- Check if the bug has already been reported in [Issues](https://github.com/flashdb/flashdb/issues)
+- Check if the bug has already been reported in [Issues](https://github.com/Scarage1/FlashDB/issues)
 - If not, create a new issue with:
   - Clear, descriptive title
   - Steps to reproduce
@@ -83,18 +83,20 @@ This project and everyone participating in it is governed by our commitment to p
 go build -o flashdb ./cmd/flashdb
 
 # Run tests
-go test ./...
-
-# Run with race detector (for concurrency testing)
 go test -race ./...
+
+# Lint
+go vet ./...
+gofmt -l .
 ```
 
 ### Frontend Development
 
 ```bash
 cd frontend
-npm install
-npm run dev
+npm ci
+npm run dev     # Dev server at http://localhost:3000
+npm run build   # Static export to out/
 ```
 
 ## Pull Request Process
