@@ -96,6 +96,4 @@ jobs:
             --name flashdb \
             --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
             --image ${{ env.REGISTRY }}/${{ steps.lower.outputs.image_name }}:latest \
-            --set-env-vars \
-              FLASHDB_ADDR=:6379 \
-              FLASHDB_DATA=/home/nonroot/data
+            --set-env-vars FLASHDB_ADDR=:6379

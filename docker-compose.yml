@@ -13,10 +13,10 @@ services:
       - "6379:6379"   # RESP protocol
       - "8080:8080"   # Web UI & REST API
     volumes:
-      - flashdb-data:/home/nonroot/data
+      - flashdb-data:/tmp/flashdb
     environment:
       - FLASHDB_ADDR=:6379
-      - FLASHDB_DATA=/home/nonroot/data
+      - FLASHDB_DATA=/tmp/flashdb
     healthcheck:
       test: ["CMD", "/flashdb", "-version"]
       interval: 10s
