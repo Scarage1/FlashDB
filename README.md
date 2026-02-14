@@ -39,7 +39,7 @@ FlashDB is a single-binary database server that speaks the Redis RESP protocol a
 docker run -d --name flashdb \
   -p 6379:6379 \
   -p 8080:8080 \
-  -v flashdb-data:/data \
+  -v flashdb-data:/home/nonroot/data \
   ghcr.io/scarage1/flashdb:latest
 ```
 

@@ -98,4 +98,4 @@ jobs:
             --image ${{ env.REGISTRY }}/${{ steps.lower.outputs.image_name }}:latest \
             --set-env-vars \
               FLASHDB_ADDR=:6379 \
-              FLASHDB_DATA=/data
+              FLASHDB_DATA=/home/nonroot/data

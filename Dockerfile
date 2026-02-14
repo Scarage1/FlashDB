@@ -49,13 +49,13 @@ LABEL org.opencontainers.image.title="FlashDB" \
 COPY --from=backend /flashdb /flashdb
 
 # Create data directory owned by nonroot user (uid 65534)
-COPY --from=backend --chown=65534:65534 /data /data
+COPY --from=backend --chown=65534:65534 /data /home/nonroot/data
 
 # Persistent data volume
-VOLUME ["/data"]
+VOLUME ["/home/nonroot/data"]
 
 # RESP protocol + Web UI / API
 EXPOSE 6379 8080
 
 ENTRYPOINT ["/flashdb"]
-CMD ["-addr", ":6379", "-webaddr", ":8080", "-data", "/data"]
+CMD ["-addr", ":6379", "-webaddr", ":8080", "-data", "/home/nonroot/data"]
