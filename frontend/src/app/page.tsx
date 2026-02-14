@@ -94,7 +94,7 @@ export default function DashboardPage() {
   const [opsHistory, setOpsHistory] = useState<number[]>([]);
   const [memHistory, setMemHistory] = useState<number[]>([]);
   const [keysHistory, setKeysHistory] = useState<number[]>([]);
-  const [connected, setConnected] = useState(false);
+  const [connected, setConnected] = useState<boolean | null>(null);
 
   const fetchInfo = useCallback(async () => {
     const data = await getServerInfo();
@@ -125,11 +125,13 @@ export default function DashboardPage() {
             {/* Status badge */}
             <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold mb-6"
               style={{ background: 'var(--brand-muted)', color: 'var(--brand)', border: '1px solid var(--brand-muted)' }}>
-              <span className="relative flex h-1.5 w-1.5">
-                {connected && <span className="absolute inline-flex h-full w-full rounded-full opacity-75" style={{ background: 'var(--success)', animation: 'pulse-dot 2s cubic-bezier(0,0,0.2,1) infinite' }} />}
-                <span className="relative inline-flex rounded-full h-1.5 w-1.5" style={{ background: connected ? 'var(--success)' : 'var(--error)' }} />
-              </span>
-              {connected ? 'Server Online' : 'Server Offline'} · v2.0
+              {connected !== null && (
+                <span className="relative flex h-1.5 w-1.5">
+                  {connected && <span className="absolute inline-flex h-full w-full rounded-full opacity-75" style={{ background: 'var(--success)', animation: 'pulse-dot 2s cubic-bezier(0,0,0.2,1) infinite' }} />}
+                  <span className="relative inline-flex rounded-full h-1.5 w-1.5" style={{ background: connected ? 'var(--success)' : 'var(--error)' }} />
+                </span>
+              )}
+              {connected === null ? 'Connecting' : connected ? 'Server Online' : 'Server Offline'} · v2.0
             </div>
 
             {/* Headline */}
@@ -311,7 +313,7 @@ export default function DashboardPage() {
             <span className="text-xs font-mono px-1.5 py-0.5 rounded" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)' }}>v2.0.0</span>
           </div>
           <div className="flex items-center gap-5 text-xs" style={{ color: 'var(--text-tertiary)' }}>
-            <a href="https://github.com" target="_blank" rel="noopener noreferrer" className="hover:underline" style={{ color: 'var(--text-secondary)' }}>GitHub</a>
+            <a href="https://github.com/Scarage1/FlashDB" target="_blank" rel="noopener noreferrer" className="hover:underline" style={{ color: 'var(--text-secondary)' }}>GitHub</a>
             <Link href="/settings" className="hover:underline" style={{ color: 'var(--text-secondary)' }}>Settings</Link>
             <span>Built with Go + Next.js</span>
           </div>

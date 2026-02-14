@@ -29,7 +29,7 @@ export default function Navbar({ onCommandPalette }: NavbarProps) {
   const pathname = usePathname();
   const { theme, toggleTheme } = useTheme();
   const [scrolled, setScrolled] = useState(false);
-  const [serverOnline, setServerOnline] = useState(false);
+  const [serverOnline, setServerOnline] = useState<boolean | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
 
@@ -135,9 +135,11 @@ export default function Navbar({ onCommandPalette }: NavbarProps) {
             </button>
 
             {/* Status */}
-            <div className="hidden sm:flex items-center px-2.5 py-1.5 rounded-lg" style={{ border: '1px solid var(--border)' }}>
-              <StatusDot online={serverOnline} label={serverOnline ? 'Online' : 'Offline'} />
-            </div>
+            {serverOnline !== null && (
+              <div className="hidden sm:flex items-center px-2.5 py-1.5 rounded-lg" style={{ border: '1px solid var(--border)' }}>
+                <StatusDot online={serverOnline} label={serverOnline ? 'Online' : 'Offline'} />
+              </div>
+            )}
 
             {/* Theme */}
             <button onClick={toggleTheme}
@@ -147,7 +149,7 @@ export default function Navbar({ onCommandPalette }: NavbarProps) {
             </button>
 
             {/* GitHub */}
-            <a href="https://github.com" target="_blank" rel="noopener noreferrer"
+            <a href="https://github.com/Scarage1/FlashDB" target="_blank" rel="noopener noreferrer"
               className="hidden md:flex w-8 h-8 rounded-lg items-center justify-center transition-colors hover:bg-[var(--bg-secondary)]"
               style={{ color: 'var(--text-secondary)', border: '1px solid var(--border)' }}>
               <ExternalLink size={14} />

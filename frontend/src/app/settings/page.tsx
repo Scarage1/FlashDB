@@ -14,10 +14,10 @@ const container = { hidden: {}, show: { transition: { staggerChildren: 0.04 } } 
 const item = { hidden: { opacity: 0, y: 8 }, show: { opacity: 1, y: 0 } };
 
 const RESOURCES = [
-  { label: 'GitHub Repository', desc: 'Source code & issues', icon: <Github size={16} />, url: 'https://github.com/shivamkumar4344/FlashDB', color: '#f59e0b' },
-  { label: 'Documentation', desc: 'Guides & API reference', icon: <BookOpen size={16} />, url: 'https://github.com/shivamkumar4344/FlashDB/tree/main/docs', color: '#0284c7' },
-  { label: 'RESP Protocol', desc: 'Protocol specification', icon: <FileText size={16} />, url: 'https://github.com/shivamkumar4344/FlashDB/blob/main/docs/PROTOCOL.md', color: '#8b5cf6' },
-  { label: 'Contributing', desc: 'How to contribute', icon: <MessageSquare size={16} />, url: 'https://github.com/shivamkumar4344/FlashDB/blob/main/CONTRIBUTING.md', color: '#22c55e' },
+  { label: 'GitHub Repository', desc: 'Source code & issues', icon: <Github size={16} />, url: 'https://github.com/Scarage1/FlashDB', color: '#f59e0b' },
+  { label: 'Documentation', desc: 'Guides & API reference', icon: <BookOpen size={16} />, url: 'https://github.com/Scarage1/FlashDB/tree/master/docs', color: '#0284c7' },
+  { label: 'RESP Protocol', desc: 'Protocol specification', icon: <FileText size={16} />, url: 'https://github.com/Scarage1/FlashDB/blob/master/docs/PROTOCOL.md', color: '#8b5cf6' },
+  { label: 'Contributing', desc: 'How to contribute', icon: <MessageSquare size={16} />, url: 'https://github.com/Scarage1/FlashDB/blob/master/CONTRIBUTING.md', color: '#22c55e' },
 ];
 
 export default function SettingsPage() {
