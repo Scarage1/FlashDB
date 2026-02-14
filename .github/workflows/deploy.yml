@@ -90,10 +90,14 @@ jobs:
         env:
           IMAGE_NAME: ${{ github.repository }}
 
+      - name: Get short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
       - name: Deploy to Container Apps
         run: |
           az containerapp update \
             --name flashdb \
             --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
-            --image ${{ env.REGISTRY }}/${{ steps.lower.outputs.image_name }}:latest \
+            --image ${{ env.REGISTRY }}/${{ steps.lower.outputs.image_name }}:${{ steps.sha.outputs.short }} \
             --set-env-vars FLASHDB_ADDR=:6379
