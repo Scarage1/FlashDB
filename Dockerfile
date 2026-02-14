@@ -35,6 +35,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
       -X github.com/flashdb/flashdb/internal/version.BuildTime=${BUILD_TIME}" \
     -o /flashdb ./cmd/flashdb
 
+# Create data directory for nonroot user
+RUN mkdir -p /data && chown 65534:65534 /data
+
 # ── Stage 3: Minimal runtime image ───────────────────────────────────────────
 FROM gcr.io/distroless/static-debian12:nonroot
 
@@ -44,6 +47,9 @@ LABEL org.opencontainers.image.title="FlashDB" \
       org.opencontainers.image.licenses="MIT"
 
 COPY --from=backend /flashdb /flashdb
+
+# Create data directory owned by nonroot user (uid 65534)
+COPY --from=backend --chown=65534:65534 /data /data
 
 # Persistent data volume
 VOLUME ["/data"]

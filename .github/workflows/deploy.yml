@@ -7,6 +7,10 @@ on:
   pull_request:
     branches: [main, master]
 
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -36,11 +40,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Lowercase image name
+        id: lower
+        run: echo "image_name=${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
+        env:
+          IMAGE_NAME: ${{ github.repository }}
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ steps.lower.outputs.image_name }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
@@ -74,12 +84,18 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      - name: Lowercase image name
+        id: lower
+        run: echo "image_name=${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
+        env:
+          IMAGE_NAME: ${{ github.repository }}
+
       - name: Deploy to Container Apps
         run: |
           az containerapp update \
             --name flashdb \
             --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
-            --image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            --image ${{ env.REGISTRY }}/${{ steps.lower.outputs.image_name }}:latest \
             --set-env-vars \
               FLASHDB_ADDR=:6379 \
               FLASHDB_DATA=/data
